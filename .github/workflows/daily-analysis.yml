@@ -1,0 +1,32 @@
+name: Daily Market Analysis & Signal Generation
+
+on:
+  schedule:
+    # 07:30 Cairo Time (UTC+2) is 05:30 UTC, Monday through Friday
+    - cron: '30 5 * * 1-5'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  daily-analysis:
+    name: Run Daily Technical Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Execute Daily Market Analysis
+        env:
+          ALLTICK_TOKEN: ${{ secrets.ALLTICK_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: npx tsx scripts/serverScheduler.ts daily-analysis

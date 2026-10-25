@@ -1,0 +1,6 @@
+{
+  "name": "AlphaFX Commodities - Automated Signals Engine",
+  "description": "منصة التوصيات الفنية الآلية اليومية لأسواق الفوركس والمعادن والنفط مع شارتات تفاعلية ومحرك فني مالي",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
