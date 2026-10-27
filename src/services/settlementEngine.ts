@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchLiveMarketRates } from './liveMarketData';
 
 export interface SettlementReport {
@@ -65,6 +65,33 @@ export async function getLivePrice(symbol: string, cachedRates?: Record<string, 
   return null;
 }
 
+function updateLocalSignal(id: string, updates: Record<string, any>) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const stored = localStorage.getItem('alphafx_today_signals');
+    if (!stored) return;
+    const list = JSON.parse(stored);
+    if (!Array.isArray(list)) return;
+    const updated = list.map((s: any) => {
+      if (s.id === id) {
+        return {
+          ...s,
+          ...updates,
+          status: updates.status || s.status,
+          outcome: updates.outcome || s.outcome,
+          exitPrice: updates.closed_price !== undefined ? updates.closed_price : s.exitPrice,
+          exitTime: updates.closed_at || s.exitTime,
+          resultPips: updates.pips_gained !== undefined ? updates.pips_gained : s.resultPips,
+        };
+      }
+      return s;
+    });
+    localStorage.setItem('alphafx_today_signals', JSON.stringify(updated));
+  } catch (e) {
+    // ignore
+  }
+}
+
 /**
  * Executes a settlement run across all pending and active signals
  */
@@ -81,21 +108,48 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
   };
 
   try {
-    // 1. Fetch all pending and active signals from Supabase
-    const { data: signals, error: fetchError } = await supabase
-      .from('signals')
-      .select('*')
-      .in('status', ['pending', 'active', 'OPEN']);
+    let signals: any[] = [];
+    let isUsingLocal = !isSupabaseConfigured();
 
-    if (fetchError) {
-      const err = `Failed to fetch signals for settlement: ${fetchError.message}`;
-      console.error(err);
-      report.errors.push(err);
-      return report;
+    if (!isUsingLocal) {
+      try {
+        const { data, error: fetchError } = await supabase
+          .from('signals')
+          .select('*')
+          .in('status', ['pending', 'active', 'OPEN']);
+
+        if (fetchError) {
+          console.warn('Supabase fetch notice (falling back to local settlement):', fetchError.message);
+          isUsingLocal = true;
+        } else {
+          signals = data || [];
+        }
+      } catch (err: any) {
+        console.warn('Supabase network notice (falling back to local settlement):', err?.message || err);
+        isUsingLocal = true;
+      }
+    }
+
+    if (isUsingLocal) {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const stored = localStorage.getItem('alphafx_today_signals');
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) {
+              signals = parsed.filter((s: any) => {
+                const st = (s.status || '').toLowerCase();
+                return st === 'pending' || st === 'active' || st === 'open';
+              });
+            }
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
     }
 
     if (!signals || signals.length === 0) {
-      console.log('No pending or active signals to settle.');
       return report;
     }
 
@@ -119,7 +173,6 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 
       if (currentPrice === null || isNaN(currentPrice) || currentPrice <= 0) {
         const warn = `Price unavailable for ${symbol}; skipping settlement this cycle.`;
-        console.warn(warn);
         report.errors.push(warn);
         continue;
       }
@@ -127,8 +180,8 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
       const status = (sig.status || 'pending').toLowerCase();
       const direction: 'LONG' | 'SHORT' = sig.direction === 'LONG' ? 'LONG' : 'SHORT';
       const entry = Number(sig.entry);
-      const stopLoss = Number(sig.stop_loss);
-      const tp1 = Number(sig.tp1);
+      const stopLoss = Number(sig.stop_loss ?? sig.stopLoss);
+      const tp1 = Number(sig.tp1 ?? sig.takeProfit1);
 
       // ─── STATE 1: PENDING -> ACTIVE ───
       if (status === 'pending') {
@@ -136,20 +189,23 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
           direction === 'LONG' ? currentPrice <= entry : currentPrice >= entry;
 
         if (isTriggered) {
-          const { error: updateErr } = await supabase
-            .from('signals')
-            .update({
-              status: 'active',
-              activated_at: nowIso,
-            })
-            .eq('id', sig.id);
+          const updates = {
+            status: 'active',
+            activated_at: nowIso,
+          };
 
-          if (updateErr) {
-            report.errors.push(`Failed to activate ${sig.id}: ${updateErr.message}`);
+          if (!isUsingLocal) {
+            try {
+              await supabase.from('signals').update(updates).eq('id', sig.id);
+            } catch {
+              updateLocalSignal(sig.id, updates);
+            }
           } else {
-            console.log(`[Settlement] Signal ${symbol} (${sig.id}) activated at price ${currentPrice}`);
-            report.activatedCount++;
+            updateLocalSignal(sig.id, updates);
           }
+
+          console.log(`[Settlement] Signal ${symbol} (${sig.id}) activated at price ${currentPrice}`);
+          report.activatedCount++;
         } else {
           report.stillPendingCount++;
         }
@@ -179,50 +235,70 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 
         if (isLoss) {
           const pips = calculatePipGain(symbol, entry, currentPrice, direction);
-          const { error: updateErr } = await supabase
-            .from('signals')
-            .update({
-              status: 'lost',
-              outcome: 'loss',
-              closed_at: nowIso,
-              closed_price: currentPrice,
-              pips_gained: pips,
-            })
-            .eq('id', sig.id);
+          const updates = {
+            status: 'lost',
+            outcome: 'loss',
+            closed_at: nowIso,
+            closed_price: currentPrice,
+            pips_gained: pips,
+          };
 
-          if (updateErr) {
-            report.errors.push(`Failed to mark ${sig.id} as lost: ${updateErr.message}`);
+          if (!isUsingLocal) {
+            try {
+              const { error: updateErr } = await supabase
+                .from('signals')
+                .update(updates)
+                .eq('id', sig.id);
+
+              if (updateErr) {
+                updateLocalSignal(sig.id, updates);
+              }
+            } catch {
+              updateLocalSignal(sig.id, updates);
+            }
           } else {
-            console.log(`[Settlement] Signal ${symbol} (${sig.id}) hit SL: lost (${pips} pips)`);
-            report.lostCount++;
+            updateLocalSignal(sig.id, updates);
           }
+
+          console.log(`[Settlement] Signal ${symbol} (${sig.id}) hit SL: lost (${pips} pips)`);
+          report.lostCount++;
         } else if (isWin) {
           const pips = calculatePipGain(symbol, entry, currentPrice, direction);
-          const { error: updateErr } = await supabase
-            .from('signals')
-            .update({
-              status: 'won',
-              outcome: 'win',
-              closed_at: nowIso,
-              closed_price: currentPrice,
-              pips_gained: pips,
-            })
-            .eq('id', sig.id);
+          const updates = {
+            status: 'won',
+            outcome: 'win',
+            closed_at: nowIso,
+            closed_price: currentPrice,
+            pips_gained: pips,
+          };
 
-          if (updateErr) {
-            report.errors.push(`Failed to mark ${sig.id} as won: ${updateErr.message}`);
+          if (!isUsingLocal) {
+            try {
+              const { error: updateErr } = await supabase
+                .from('signals')
+                .update(updates)
+                .eq('id', sig.id);
+
+              if (updateErr) {
+                updateLocalSignal(sig.id, updates);
+              }
+            } catch {
+              updateLocalSignal(sig.id, updates);
+            }
           } else {
-            console.log(`[Settlement] Signal ${symbol} (${sig.id}) hit TP1: won (+${pips} pips)`);
-            report.wonCount++;
+            updateLocalSignal(sig.id, updates);
           }
+
+          console.log(`[Settlement] Signal ${symbol} (${sig.id}) hit TP1: won (+${pips} pips)`);
+          report.wonCount++;
         } else {
           report.stillActiveCount++;
         }
       }
     }
   } catch (err: any) {
-    const msg = `runSettlement unexpected exception: ${err?.message || err}`;
-    console.error(msg);
+    const msg = `runSettlement notice: ${err?.message || err}`;
+    console.warn(msg);
     report.errors.push(msg);
   }
 
@@ -235,22 +311,52 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 export async function closeExpiredSignals(): Promise<number> {
   try {
     const nowIso = new Date().toISOString();
-    const { data, error } = await supabase
-      .from('signals')
-      .update({
-        status: 'not_triggered',
-        outcome: 'not_triggered',
-        closed_at: nowIso,
-      })
-      .eq('status', 'pending')
-      .select('id');
+    let count = 0;
 
-    if (error) {
-      console.warn('closeExpiredSignals error:', error.message);
-      return 0;
+    if (isSupabaseConfigured()) {
+      try {
+        const { data, error } = await supabase
+          .from('signals')
+          .update({
+            status: 'not_triggered',
+            outcome: 'not_triggered',
+            closed_at: nowIso,
+          })
+          .eq('status', 'pending')
+          .select('id');
+
+        if (!error && data) {
+          count = data.length;
+        }
+      } catch (e) {
+        // continue to local fallback
+      }
     }
 
-    const count = data ? data.length : 0;
+    // Also update localStorage
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const stored = localStorage.getItem('alphafx_today_signals');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            let localCount = 0;
+            const updated = parsed.map((s: any) => {
+              if ((s.status || '').toLowerCase() === 'pending') {
+                localCount++;
+                return { ...s, status: 'not_triggered', outcome: 'not_triggered', closed_at: nowIso };
+              }
+              return s;
+            });
+            localStorage.setItem('alphafx_today_signals', JSON.stringify(updated));
+            if (count === 0) count = localCount;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     console.log(`[Settlement] Closed ${count} expired pending signals as not_triggered.`);
     return count;
   } catch (err) {

@@ -16,6 +16,7 @@ import {
   ChevronUp,
   Flame,
   Lock,
+  RotateCcw,
 } from 'lucide-react';
 
 interface SignalCardProps {
@@ -33,11 +34,13 @@ export const SignalCard: React.FC<SignalCardProps> = ({
   const [lotSize, setLotSize] = useState<number>(0.1);
 
   const isLong = signal.direction === 'LONG';
-  const isProfit = signal.resultPips > 0;
-  const isLoss = signal.resultPips < 0;
+  const isClosed = signal.status === 'won' || signal.status === 'lost' || signal.status === 'TP1_HIT' || signal.status === 'TP2_HIT' || signal.status === 'SL_HIT' || signal.status === 'CLOSED_IN_PROFIT';
+  const displayPips = isClosed && signal.pips_gained != null ? signal.pips_gained : (signal.resultPips ?? 0);
+  const isProfit = displayPips > 0;
+  const isLoss = displayPips < 0;
 
   // Format currency/pip decimals
-  const formatPrice = (val: number) => val.toFixed(signal.pipValueDecimals);
+  const formatPrice = (val: number) => (val || 0).toFixed(signal.pipValueDecimals);
 
   // Copy recommendation to clipboard
   const handleCopy = (e: React.MouseEvent) => {
@@ -130,6 +133,26 @@ export const SignalCard: React.FC<SignalCardProps> = ({
               <span className="text-xs text-slate-400 font-medium">
                 {signal.nameAr} · إطار {signal.timeframe}
               </span>
+              <span className="text-[11px] text-amber-400 font-mono mt-0.5 flex items-center gap-1">
+                <span>⏱️ وقت التفعيل:</span>
+                <strong className="text-white">
+                  {signal.activated_at
+                    ? new Date(signal.activated_at).toLocaleString('ar-EG', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : signal.timestamp
+                    ? new Date(signal.timestamp).toLocaleString('ar-EG', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : 'قيد الانتظار'}
+                </strong>
+              </span>
             </div>
           </div>
 
@@ -180,7 +203,7 @@ export const SignalCard: React.FC<SignalCardProps> = ({
                     : 'text-slate-200'
                 }
               >
-                {isProfit ? `+${signal.pips_gained != null ? signal.pips_gained : signal.resultPips}` : (signal.pips_gained != null ? signal.pips_gained : signal.resultPips)} نقطة
+                {isProfit ? `+${displayPips}` : `${displayPips}`} نقطة
               </span>
             </div>
 
@@ -213,6 +236,24 @@ export const SignalCard: React.FC<SignalCardProps> = ({
             <span className="text-slate-400">R:R:</span>
             <span className="font-bold text-slate-200">{signal.riskRewardRatio}</span>
           </div>
+        </div>
+
+        {/* Activation Date & Time Badge */}
+        <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-slate-950/90 rounded-lg border border-slate-800/90 mb-3 text-[11px] font-mono text-slate-300">
+          <span className="text-slate-400 flex items-center gap-1">
+            <span>⏱️ تاريخ ووقت التفعيل:</span>
+          </span>
+          <span className="text-amber-300 font-bold">
+            {signal.activated_at || signal.timestamp
+              ? new Date(signal.activated_at || signal.timestamp!).toLocaleString(undefined, {
+                  year: 'numeric',
+                  month: 'numeric',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })
+              : 'قيد الانتظار'}
+          </span>
         </div>
 
         {/* Pricing Matrix (Locked Entry, SL, TP1, TP2) */}
@@ -266,23 +307,46 @@ export const SignalCard: React.FC<SignalCardProps> = ({
         </div>
 
         {/* Live Market Price & Targets Distance Progress */}
-        <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-950/60 rounded-lg border border-slate-800/60 text-[11px] font-mono text-slate-300 mb-3">
-          <div className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="text-slate-400">السعر اللحظي الآن:</span>
-            <strong className="text-white font-bold">{formatPrice(signal.currentPrice)}</strong>
-          </div>
+        <div className="flex flex-col gap-2 p-2 bg-slate-950/60 rounded-lg border border-slate-800/60 mb-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              <span className="text-slate-400">السعر اللحظي:</span>
+              <strong className="text-white font-bold bg-slate-900/90 px-2 py-0.5 rounded border border-slate-700/60 font-mono">
+                {formatPrice(signal.currentPrice)}
+              </strong>
+              {displayPips !== 0 && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${isProfit ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'}`}>
+                  {isProfit ? `+${displayPips}` : `${displayPips}`} نقطة
+                </span>
+              )}
+            </div>
 
-          <div className="flex items-center gap-2 text-[10px]">
             {signal.status === 'OPEN' && (
-              <span className="text-slate-400">
-                متبقي على الهدف الأول:{' '}
+              <span className="text-[10px] text-slate-400">
+                متبقي على TP1:{' '}
                 <strong className="text-sky-400">
                   {Math.abs(Math.round(calculatePips(signal.symbol, signal.takeProfit1, signal.currentPrice)))} نقطة
                 </strong>
               </span>
             )}
           </div>
+
+          {/* Sparkline */}
+          {signal.candles && signal.candles.length > 1 && (
+            <div className="h-8 w-full">
+              <svg viewBox="0 0 100 30" className="w-full h-full overflow-hidden" preserveAspectRatio="none">
+                <path
+                  d={`M ${signal.candles.slice(-60).map((c, i, arr) => `${(i / (arr.length - 1)) * 100},${30 - ((c.close - Math.min(...arr.map(c => c.close))) / (Math.max(...arr.map(c => c.close)) - Math.min(...arr.map(c => c.close)) || 1)) * 30}`).join(' L ')}`}
+                  fill="none"
+                  stroke={isLong ? '#10b981' : '#f43f5e'}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </div>
+          )}
         </div>
 
         {/* Reasoning / Technical Breakdown */}
@@ -354,6 +418,16 @@ export const SignalCard: React.FC<SignalCardProps> = ({
           className="p-2 bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-xs transition-colors border border-slate-700/60"
         >
           {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            window.location.reload();
+          }}
+          title="تحديث البيانات"
+          className="p-2 bg-slate-800/60 hover:bg-slate-800 text-amber-400 rounded-lg text-xs transition-colors border border-amber-500/30"
+        >
+          <RotateCcw className="w-4 h-4" />
         </button>
       </div>
     </div>

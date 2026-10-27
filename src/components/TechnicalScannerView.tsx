@@ -210,7 +210,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
               {filteredInstruments.map((inst, idx) => {
                 const liveData = liveRates[inst.symbol];
                 const displayPrice = liveData?.price ?? inst.basePrice;
-                const isLive = Boolean(liveData?.source === 'live-api');
+                const isLive = Boolean(liveData && liveData.source !== 'simulated');
 
                 const rsiVal = 42 + ((idx * 7) % 32);
                 const adxVal = 21 + ((idx * 5) % 18);
@@ -237,8 +237,8 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
                     </td>
 
                     <td className="py-3.5 px-3 text-center font-sans">
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/40 text-emerald-400 border border-emerald-900/40">
-                        {isLive ? 'بث حي API' : 'محاكاة'}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${isLive ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-900/40' : 'bg-slate-800 text-slate-400'}`}>
+                        {isLive ? 'بث حي متصل' : 'محاكاة'}
                       </span>
                     </td>
 

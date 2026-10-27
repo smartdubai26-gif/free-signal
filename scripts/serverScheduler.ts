@@ -5,18 +5,32 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { validateSignalForProduction } from '../src/services/signalRepository';
 import { Signal, SignalDirection, Timeframe } from '../src/types/signals';
 
+function cleanUrl(url?: string): string {
+  if (!url) return 'https://placeholder-project.supabase.co';
+  const match = url.match(/https?:\/\/[^\s"'`]+/);
+  return match ? match[0] : url.trim();
+}
+
+function cleanKey(key?: string): string {
+  if (!key) return 'placeholder-anon-key';
+  return key.replace(/^[^\w.-]+/, '').trim();
+}
+
 // Environment variables configuration (supports GitHub Actions secrets and local .env)
-const SUPABASE_URL =
+const rawUrl =
   process.env.SUPABASE_URL ||
   process.env.VITE_SUPABASE_URL ||
   'https://placeholder-project.supabase.co';
 
-const SUPABASE_KEY =
+const rawKey =
   process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   'placeholder-anon-key';
+
+const SUPABASE_URL = cleanUrl(rawUrl);
+const SUPABASE_KEY = cleanKey(rawKey);
 
 const ALLTICK_TOKEN =
   process.env.ALLTICK_TOKEN ||

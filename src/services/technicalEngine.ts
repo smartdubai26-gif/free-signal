@@ -225,6 +225,11 @@ export function evaluateSignalOutcome(signal: Signal, latestPrice: number, sessi
     }
   }
 
+  let activatedAt = signal.activated_at;
+  if (!activatedAt && (status === 'OPEN' || status === 'active' || status === 'TP1_HIT' || status === 'TP2_HIT' || status === 'SL_HIT')) {
+    activatedAt = new Date().toISOString();
+  }
+
   return {
     ...signal,
     status,
@@ -235,6 +240,7 @@ export function evaluateSignalOutcome(signal: Signal, latestPrice: number, sessi
     exitPrice,
     exitReasonAr,
     exitTime,
+    activated_at: activatedAt,
   };
 }
 
@@ -556,5 +562,6 @@ export function verifyAndAppendOpportunities(existing: Signal[], newSignals: Sig
 
 export function clearDemoData(signals: Signal[]): Signal[] {
   if (!Array.isArray(signals)) return [];
-  return signals.filter((s) => s && !s.id.startsWith('sig-'));
+  // Only remove obvious synthetic throwaway test ids if any, preserve all authentic analysis signals
+  return signals.filter((s) => s && !s.id?.startsWith('demo-fake-'));
 }

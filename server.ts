@@ -20,6 +20,29 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Paper trading persistence
+const PERSISTENCE_FILE = path.join(__dirname, 'paper_opportunities.json');
+const paperOpportunities: any[] = [];
+
+function saveOpportunities() {
+  try {
+    fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(paperOpportunities));
+  } catch (e) {
+    console.error('Failed to persist opportunities:', e);
+  }
+}
+
+function loadOpportunities() {
+  try {
+    if (fs.existsSync(PERSISTENCE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf-8'));
+      paperOpportunities.push(...data);
+    }
+  } catch (e) {
+    console.error('Failed to load opportunities:', e);
+  }
+}
+
 async function startServer() {
   loadOpportunities();
   const app = express();
@@ -169,23 +192,6 @@ async function startServer() {
   // Strictly PAPER MODE: Zero broker connection, zero order submission.
   // =========================================================================
   let tdWs: TwelveDataWebSocket;
-  const paperOpportunities: any[] = [];
-  const PERSISTENCE_FILE = './paper_opportunities.json';
-  
-  function saveOpportunities() {
-    try {
-      fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(paperOpportunities));
-    } catch (e) { console.error('Failed to persist opportunities:', e); }
-  }
-
-  function loadOpportunities() {
-    try {
-      if (fs.existsSync(PERSISTENCE_FILE)) {
-        const data = JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf-8'));
-        paperOpportunities.push(...data);
-      }
-    } catch (e) { console.error('Failed to load opportunities:', e); }
-  }
 
   const INTERVAL_MAP: Record<string, string> = {
     M1: '1min',

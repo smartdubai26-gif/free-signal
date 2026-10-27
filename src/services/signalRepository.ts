@@ -27,7 +27,20 @@ export interface DbSignalRecord {
  * HARD PRODUCTION GUARD: Strict validation before any signal persistence
  */
 export function validateSignalForProduction(sig: Signal): void {
-  const validStates = ['pending', 'active', 'won', 'lost', 'not_triggered', 'cancelled'];
+  const validStates = [
+    'pending',
+    'active',
+    'won',
+    'lost',
+    'not_triggered',
+    'cancelled',
+    'open',
+    'tp1_hit',
+    'tp2_hit',
+    'sl_hit',
+    'closed_in_profit',
+    'expired',
+  ];
   const validSymbols = [
     'EUR/USD',
     'GBP/USD',
@@ -40,6 +53,7 @@ export function validateSignalForProduction(sig: Signal): void {
     'XAG/USD',
     'WTI',
     'WTI Oil',
+    'Brent Oil',
   ];
 
   if (!validSymbols.includes(sig.symbol)) {
@@ -306,3 +320,12 @@ export async function getClosedSignals(): Promise<Signal[]> {
   }
 }
 
+export async function deleteAllSignalsFromSupabase() {
+  try {
+    const { error } = await supabase.from('signals').delete().neq('id', '0');
+    return !error;
+  } catch (err) {
+    console.error('Error deleting all signals:', err);
+    return false;
+  }
+}

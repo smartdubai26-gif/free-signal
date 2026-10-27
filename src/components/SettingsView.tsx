@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ALL_INSTRUMENTS } from '../services/mockData';
 import { ApiConfig, testTwelveDataApiKey, testFinnhubApiKey, testAllTickApiKey } from '../services/liveMarketData';
+import { deleteAllSignalsFromSupabase } from '../services/signalRepository';
 import {
   Bell,
   Volume2,
@@ -275,10 +276,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                 <Key className="w-3.5 h-3.5 text-amber-400" />
-                <span>أدخل مفتاح الـ API الخاص بك ({selectedProvider === 'twelvedata' ? 'Twelve Data' : 'Finnhub'} API Key):</span>
+                <span>أدخل مفتاح الـ API الخاص بك ({selectedProvider === 'twelvedata' ? 'Twelve Data' : selectedProvider === 'alltick' ? 'AllTick' : 'Finnhub'} API Key):</span>
               </label>
               <a
-                href={selectedProvider === 'twelvedata' ? 'https://twelvedata.com/pricing' : 'https://finnhub.io/register'}
+                href={selectedProvider === 'twelvedata' ? 'https://twelvedata.com/pricing' : selectedProvider === 'alltick' ? 'https://alltick.co/' : 'https://finnhub.io/register'}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] text-amber-400 hover:underline flex items-center gap-1"
@@ -291,7 +292,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex flex-col sm:flex-row items-center gap-2">
               <input
                 type="password"
-                placeholder={selectedProvider === 'twelvedata' ? 'e.g. 74d89a20b...' : 'e.g. c123456789...'}
+                placeholder={selectedProvider === 'twelvedata' ? 'e.g. 74d89a20b...' : selectedProvider === 'alltick' ? 'e.g. token_...' : 'e.g. c123456789...'}
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 font-mono focus:outline-none focus:border-amber-500"
@@ -533,12 +534,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             قراءة إخلاء المسؤولية الكامل
           </button>
+          
           <button
-            onClick={onResetData}
-            className="px-3.5 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 rounded-xl text-xs font-semibold transition-colors border border-rose-500/20 flex items-center gap-1.5"
+            onClick={async () => {
+              if (confirm('هل أنت متأكد؟ سيتم مسح كافة الصفقات والبيانات من كل الأقسام (بما في ذلك قاعدة البيانات على الويب). لن يتم مسح مفاتيح الـ API.')) {
+                // 1. Clear local storage
+                Object.keys(localStorage).forEach(key => {
+                  if (!key.includes('api_config')) {
+                    localStorage.removeItem(key);
+                  }
+                });
+                localStorage.setItem('alphafx_today_signals', '{"cleared":true}');
+                localStorage.setItem('alphafx_historical_signals', '{"cleared":true}');
+                
+                // 2. Clear remote database
+                await deleteAllSignalsFromSupabase();
+                
+                window.location.reload();
+              }
+            }}
+            className="px-3.5 py-2 bg-rose-900/50 hover:bg-rose-800 text-rose-200 rounded-xl text-xs font-bold transition-colors border border-rose-700 flex items-center gap-1.5"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>إعادة ضبط البيانات</span>
+            <span>تصفير كامل للبيانات (Hard Reset)</span>
+          </button>
+
+          <button
+            onClick={onResetData}
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl text-xs font-semibold transition-colors border border-slate-700 flex items-center gap-1.5"
+          >
+            <span>إعادة ضبط المصنع (افتراضي)</span>
           </button>
         </div>
       </div>
