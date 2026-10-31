@@ -5,6 +5,10 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Relative asset URLs so the same build works at a domain root (Vercel)
+    // and inside a nested static folder (the preview CDN). An absolute
+    // "/assets/..." breaks the moment the page is not served from the root.
+    base: './',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

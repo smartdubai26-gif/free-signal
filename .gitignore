@@ -1,8 +1,25 @@
+# Dependencies
 node_modules/
+
+# Build output
 build/
 dist/
 coverage/
-.DS_Store
-*.log
-.env*
+server.js
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
 !.env.example
+*.pem
+*.key
+*.p12
+
+# Local runtime state
+paper_opportunities.json
+*.log
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
