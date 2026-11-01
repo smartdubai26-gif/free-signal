@@ -1,5 +1,6 @@
 import { Candle, Signal, MarketSession, PerformanceStats } from '../types/signals';
 import { calculateEMA, calculateRSI } from './technicalEngine';
+import { getMarketClock, formatMarketDateTime } from './marketClock';
 
 /**
  * Helper to generate authentic realistic candles for a symbol
@@ -96,11 +97,25 @@ export const MARKET_SESSIONS: MarketSession[] = [
   },
 ];
 
-const todayIsoStr = new Date().toISOString().split('T')[0] + 'T07:30:00Z';
-const todayDateTag = new Date().toISOString().split('T')[0].replace(/-/g, '');
+/* ------------------------------------------------------------------ */
+/* Seed timestamps                                                     */
+/* ------------------------------------------------------------------ */
+/**
+ * BUGFIX (activation-time): these used to be
+ *     new Date().toISOString().split('T')[0] + 'T07:30:00Z'
+ * which stamped *today's UTC date* onto every seed signal at a hard-coded
+ * 07:30Z — including Saturdays, when the market is shut and no such
+ * activation could ever have happened.
+ *
+ * Now the timestamp is the last moment the FX week actually opened, so a
+ * seed can never claim an activation inside a closed weekend.
+ */
+const _seedClock = getMarketClock();
+const todayIsoStr = new Date(_seedClock.lastOpenMs).toISOString();
+const todayDateTag = _seedClock.date.replace(/-/g, '');
 
-// Initial realistic recommendations for today (published 07:30 GMT before London Open)
-export const INITIAL_TODAY_SIGNALS: Signal[] = [
+// Seed templates. Timestamps are re-stamped per call in `buildSeedSignals()`.
+const SEED_TEMPLATES: Signal[] = [
   {
     id: `sig-xauusd-${todayDateTag}`,
     symbol: 'XAU/USD',
@@ -132,7 +147,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(4015, 12, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 4043.25,
     resultPips: 48,
@@ -175,7 +190,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(1.1230, 0.0035, 60, 'down'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 1.1186,
     resultPips: 34,
@@ -218,7 +233,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(1.3280, 0.004, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 1.3347,
     resultPips: 42,
@@ -261,7 +276,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(70.5, 0.9, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 71.85,
     resultPips: 75,
@@ -304,7 +319,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(158.2, 0.65, 60, 'down'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 157.44,
     resultPips: 51,
@@ -347,7 +362,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(47.2, 0.65, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 49.28,
     resultPips: 78,
@@ -390,7 +405,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(73.8, 1.1, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 76.20,
     resultPips: 130,
@@ -433,7 +448,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(1.4270, 0.003, 60, 'down'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 1.4191,
     resultPips: 49,
@@ -476,7 +491,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(0.6860, 0.003, 60, 'up'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 0.6916,
     resultPips: 26,
@@ -519,7 +534,7 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     candles: generateCandles(0.8340, 0.0028, 60, 'down'),
     timestamp: todayIsoStr,
     activated_at: todayIsoStr,
-    sessionTarget: 'جلسة لندن (07:30 GMT)',
+    sessionTarget: 'جلسة لندن (إغلاق شمعة H4)',
     status: 'OPEN',
     currentPrice: 0.8283,
     resultPips: 37,
@@ -532,6 +547,48 @@ export const INITIAL_TODAY_SIGNALS: Signal[] = [
     isLocked: true,
   }
 ];
+
+/* ------------------------------------------------------------------ */
+/* Seed builder — the ONLY way the UI should obtain starter signals    */
+/* ------------------------------------------------------------------ */
+/**
+ * Produces today's starter signals with timestamps that are TRUE for the
+ * moment of the call.
+ *
+ * Behaviour by market state:
+ *  - Market OPEN  -> signals are stamped at the real session open and are
+ *                    presented as active/pending, same as before.
+ *  - Market CLOSED (weekend / Friday-close / Sunday-preopen) -> the same
+ *                    setups are returned but explicitly EXPIRED, stamped at
+ *                    the last real session open and closed at week end.
+ *                    The UI must render these as "منتهية", never as today's
+ *                    live opportunities.
+ */
+export function buildSeedSignals(nowMs: number = Date.now()): Signal[] {
+  const clock = getMarketClock(nowMs);
+  const dateTag = clock.date.replace(/-/g, '');
+  const activationIso = new Date(clock.lastOpenMs).toISOString();
+  const isClosed = !clock.isOpen;
+
+  return SEED_TEMPLATES.map((tpl) => {
+    const symbolSlug = tpl.symbol.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    return {
+      ...tpl,
+      id: `sig-${symbolSlug}-${dateTag}`,
+      timestamp: activationIso,
+      activated_at: isClosed ? activationIso : tpl.activated_at ? activationIso : undefined,
+      status: isClosed ? 'EXPIRED' : (tpl.status as any),
+      closed_at: isClosed ? activationIso : undefined,
+      sessionTarget: isClosed
+        ? `آخر جلسة مفتوحة · ${formatMarketDateTime(activationIso)}`
+        : tpl.sessionTarget,
+      isLiveFeed: !isClosed,
+    };
+  });
+}
+
+/** Back-compat snapshot for call sites that only read `.length`. */
+export const INITIAL_TODAY_SIGNALS: Signal[] = buildSeedSignals();
 
 // Settled Historical Signals for the Results Ledger & Archive
 export const HISTORICAL_SIGNALS: Signal[] = [];

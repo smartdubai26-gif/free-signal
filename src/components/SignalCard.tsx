@@ -2,6 +2,13 @@ import React, { useState } from 'react';
 import { Signal } from '../types/signals';
 import { calculatePips } from '../services/technicalEngine';
 import {
+  formatMarketDateTime,
+  formatMarketDateTimeShort,
+  classifySignal,
+  isFutureTimestamp,
+  MARKET_TZ_LABEL_AR,
+} from '../services/marketClock';
+import {
   TrendingUp,
   TrendingDown,
   Target,
@@ -34,7 +41,18 @@ export const SignalCard: React.FC<SignalCardProps> = ({
   const [lotSize, setLotSize] = useState<number>(0.1);
 
   const isLong = signal.direction === 'LONG';
-  const isClosed = signal.status === 'won' || signal.status === 'lost' || signal.status === 'TP1_HIT' || signal.status === 'TP2_HIT' || signal.status === 'SL_HIT' || signal.status === 'CLOSED_IN_PROFIT';
+  const isClosed = signal.status === 'won' || signal.status === 'lost' || signal.status === 'TP1_HIT' || signal.status === 'TP2_HIT' || signal.status === 'SL_HIT' || signal.status === 'CLOSED_IN_PROFIT' || signal.status === 'EXPIRED';
+
+  // BUGFIX (the reported bug): the card used to render `activated_at` with
+  // `toLocaleString('ar-EG')` and NO timeZone, i.e. the *device's* zone, and it
+  // never questioned whether the timestamp was plausible. A Saturday activation
+  // therefore looked perfectly normal. Now every timestamp is rendered in the
+  // market zone with an explicit offset, and an implausible one is flagged.
+  const freshness = classifySignal(signal);
+  const activationIso = signal.activated_at || signal.timestamp;
+  const activationIsFuture = isFutureTimestamp(activationIso);
+  const isStale = freshness === 'stale';
+  const isExpired = signal.status === 'EXPIRED' || isStale;
   const displayPips = isClosed && signal.pips_gained != null ? signal.pips_gained : (signal.resultPips ?? 0);
   const isProfit = displayPips > 0;
   const isLoss = displayPips < 0;
@@ -136,22 +154,9 @@ export const SignalCard: React.FC<SignalCardProps> = ({
               <span className="text-[11px] text-amber-400 font-mono mt-0.5 flex items-center gap-1">
                 <span>⏱️ وقت التفعيل:</span>
                 <strong className="text-white">
-                  {signal.activated_at
-                    ? new Date(signal.activated_at).toLocaleString('ar-EG', {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                    : signal.timestamp
-                    ? new Date(signal.timestamp).toLocaleString('ar-EG', {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                    : 'قيد الانتظار'}
+                  {activationIso ? formatMarketDateTimeShort(activationIso) : 'قيد الانتظار'}
                 </strong>
+                <span className="text-[10px] text-slate-500">({MARKET_TZ_LABEL_AR})</span>
               </span>
             </div>
           </div>
@@ -180,9 +185,9 @@ export const SignalCard: React.FC<SignalCardProps> = ({
                 <span>⏳ قيد الانتظار</span>
               </span>
             )}
-            {(signal.status === 'not_triggered' || signal.status === 'EXPIRED') && (
+            {(signal.status === 'not_triggered' || signal.status === 'EXPIRED' || isExpired) && (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-700/50 text-slate-400 font-medium border border-slate-600/40">
-                ⏹️ لم تتفعل (ملغاة)
+                ⏹️ منتهية (لم تعد فرصة حية)
               </span>
             )}
             {signal.status === 'cancelled' && (
@@ -244,23 +249,34 @@ export const SignalCard: React.FC<SignalCardProps> = ({
             <span>⏱️ تاريخ ووقت التفعيل:</span>
           </span>
           <span className="text-amber-300 font-bold">
-            {signal.activated_at || signal.timestamp
-              ? new Date(signal.activated_at || signal.timestamp!).toLocaleString(undefined, {
-                  year: 'numeric',
-                  month: 'numeric',
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })
-              : 'قيد الانتظار'}
+            {activationIso ? formatMarketDateTime(activationIso) : 'قيد الانتظار'}
           </span>
         </div>
 
+        {/* Data-integrity warnings — never let a bad timestamp pass silently */}
+        {activationIsFuture && (
+          <div className="mb-3 px-3 py-2 rounded-lg bg-rose-950/50 border border-rose-700/60 text-[11px] text-rose-200 flex items-start gap-2">
+            <span className="shrink-0">⚠️</span>
+            <span>
+              <strong>وقت تفعيل غير صالح:</strong> الطابع الزمني في المستقبل، ولا يمكن أن يكون
+              تفعيلاً حقيقياً. تم استبعاد هذه الإشارة من الفرص الحية.
+            </span>
+          </div>
+        )}
+        {isStale && !activationIsFuture && (
+          <div className="mb-3 px-3 py-2 rounded-lg bg-amber-950/40 border border-amber-700/50 text-[11px] text-amber-200 flex items-start gap-2">
+            <span className="shrink-0">🕒</span>
+            <span>
+              <strong>إشارة منتهية:</strong> تعود إلى جلسة سابقة وليست من فرص اليوم الحالي.
+            </span>
+          </div>
+        )}
+
         {/* Pricing Matrix (Locked Entry, SL, TP1, TP2) */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2 text-xs font-mono">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 sm:gap-2 mb-2 text-xs font-mono">
           {/* Entry (Permanently Locked) */}
-          <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
-            <div className="text-[11px] text-slate-400 mb-1 flex items-center justify-between">
+            <div className="p-2 sm:p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
+            <div className="text-[11px] text-slate-400 mb-1 flex items-center justify-between gap-1">
               <span className="flex items-center gap-1 text-emerald-400">
                 <Lock className="w-3 h-3" />
                 <span>دخول ثابت</span>
@@ -357,13 +373,13 @@ export const SignalCard: React.FC<SignalCardProps> = ({
 
         {/* Lot Calculator Toggle Preview */}
         {showCalculator && (
-          <div className="p-3 bg-slate-950/90 border border-slate-800 rounded-lg mb-3 text-xs">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-slate-300 font-medium flex items-center gap-1.5">
-                <Calculator className="w-3.5 h-3.5 text-amber-400" />
-                حاسبة العائد المتوقع وحجم اللوت (Lot Sizing)
+          <div className="p-2.5 sm:p-3 bg-slate-950/90 border border-slate-800 rounded-lg mb-3 text-xs overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="text-slate-300 font-medium flex items-center gap-1.5 min-w-0">
+                <Calculator className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="leading-tight">حاسبة العائد المتوقع وحجم اللوت (Lot Sizing)</span>
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <span className="text-slate-400">اللوت:</span>
                 <input
                   type="number"
@@ -372,11 +388,11 @@ export const SignalCard: React.FC<SignalCardProps> = ({
                   max="10"
                   value={lotSize}
                   onChange={(e) => setLotSize(Math.max(0.01, parseFloat(e.target.value) || 0.01))}
-                  className="w-16 px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-center text-white font-mono text-xs"
+                  className="w-20 sm:w-16 min-h-[44px] px-2 bg-slate-900 border border-slate-700 rounded-lg text-center text-white font-mono text-base sm:text-xs"
                 />
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-2 text-center font-mono">
+            <div className="grid grid-cols-3 gap-1.5 sm:gap-2 text-center font-mono">
               <div className="p-1.5 bg-rose-950/40 rounded border border-rose-900/30">
                 <div className="text-[10px] text-rose-300">المخاطرة عند SL</div>
                 <div className="text-rose-400 font-bold">-${expectedLossSL}</div>
@@ -395,19 +411,20 @@ export const SignalCard: React.FC<SignalCardProps> = ({
       </div>
 
       {/* Card Actions Footer */}
-      <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
+      <div className="pt-3 border-t border-slate-800/80 flex items-center gap-2">
         <button
           onClick={() => onOpenDetails(signal)}
-          className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700/80 text-white rounded-lg text-xs font-semibold transition-colors"
+          className="tap-h flex-1 flex items-center justify-center gap-2 px-3 py-2.5 bg-slate-800 hover:bg-slate-700/80 text-white rounded-lg text-xs font-semibold transition-colors"
         >
-          <BarChart2 className="w-3.5 h-3.5 text-amber-400" />
-          <span>الشارت والتحليل الفني</span>
+          <BarChart2 className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="truncate">الشارت والتحليل الفني</span>
         </button>
 
         <button
           onClick={() => setShowCalculator(!showCalculator)}
           title="حاسبة اللوت"
-          className="p-2 bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-xs transition-colors border border-slate-700/60"
+          aria-label="حاسبة اللوت"
+          className="tap flex items-center justify-center bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-700/60 active:scale-95"
         >
           <Calculator className="w-4 h-4 text-slate-300" />
         </button>
@@ -415,7 +432,8 @@ export const SignalCard: React.FC<SignalCardProps> = ({
         <button
           onClick={handleCopy}
           title="نسخ التوصية"
-          className="p-2 bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-xs transition-colors border border-slate-700/60"
+          aria-label="نسخ التوصية"
+          className="tap flex items-center justify-center bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-700/60 active:scale-95"
         >
           {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
         </button>
@@ -425,7 +443,8 @@ export const SignalCard: React.FC<SignalCardProps> = ({
             window.location.reload();
           }}
           title="تحديث البيانات"
-          className="p-2 bg-slate-800/60 hover:bg-slate-800 text-amber-400 rounded-lg text-xs transition-colors border border-amber-500/30"
+          aria-label="تحديث البيانات"
+          className="tap flex items-center justify-center bg-slate-800/60 hover:bg-slate-800 text-amber-400 rounded-lg transition-colors border border-amber-500/30 active:scale-95"
         >
           <RotateCcw className="w-4 h-4" />
         </button>

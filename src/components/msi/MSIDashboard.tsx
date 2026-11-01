@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { useResponsiveTable } from '../../hooks/useResponsiveTable';
 import { ALL_INSTRUMENTS } from '../../services/mockData';
 import { DataProvenance, MSITimeframe, MSIDirection, MSIOpportunity } from '../../types/msi';
 import {
@@ -69,6 +70,7 @@ interface PaperOpportunityRecord {
 }
 
 export const MSIDashboard: React.FC = () => {
+  const journalTableRef = useResponsiveTable<HTMLTableElement>();
   const [selectedSymbol, setSelectedSymbol] = useState<string>('EUR/USD');
   const [selectedTimeframe, setSelectedTimeframe] = useState<MSITimeframe>('M15');
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -478,7 +480,7 @@ export const MSIDashboard: React.FC = () => {
           </div>
         ) : (
           <div className="w-full overflow-x-auto -mx-5 px-5 sm:mx-0 sm:px-0 mt-4">
-            <table className="w-full min-w-[600px] text-xs font-mono text-slate-300">
+            <table ref={journalTableRef} className="rtable w-full sm:min-w-[600px] text-xs font-mono text-slate-300">
               <thead>
                 <tr className="border-b border-slate-800 text-[11px] text-slate-400 text-start">
                   <th className="py-2.5 px-3 text-start">الوقت (UTC)</th>

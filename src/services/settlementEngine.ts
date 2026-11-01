@@ -1,5 +1,6 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchLiveMarketRates } from './liveMarketData';
+import { getMarketClock, isForexWeekend } from './marketClock';
 
 export interface SettlementReport {
   processedCount: number;
@@ -167,6 +168,19 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 
     const nowIso = new Date().toISOString();
 
+    // BUGFIX (the reported bug): settlement used to run blind. On a Saturday it
+    // still compared Friday's stale prices against pending entries and stamped
+    // `activated_at = nowIso` — i.e. it "activated opportunities" on a day the
+    // market was shut. Activation is now gated on the FX week being open.
+    const clock = getMarketClock();
+    const marketOpen = clock.isOpen;
+    if (!marketOpen) {
+      report.errors.push(
+        `Market closed (${clock.closedReasonAr}). Activation and TP/SL resolution skipped; ` +
+          `only expiry reconciliation runs.`
+      );
+    }
+
     for (const sig of signals) {
       const symbol = sig.symbol;
       const currentPrice = await getLivePrice(symbol, marketRates);
@@ -185,6 +199,13 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 
       // ─── STATE 1: PENDING -> ACTIVE ───
       if (status === 'pending') {
+        // A pending order may only be triggered while the market is trading.
+        // Outside the week it stays pending (or is expired by the EOD pass).
+        if (!marketOpen) {
+          report.stillPendingCount++;
+          continue;
+        }
+
         const isTriggered =
           direction === 'LONG' ? currentPrice <= entry : currentPrice >= entry;
 
@@ -214,6 +235,13 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
 
       // ─── STATE 2: ACTIVE -> WON or LOST ───
       if (status === 'active' || status === 'open') {
+        // Outside the week the last quote is frozen, so a TP/SL comparison
+        // against it would be a phantom fill. Leave the position untouched.
+        if (!marketOpen) {
+          report.stillActiveCount++;
+          continue;
+        }
+
         let isLoss = false;
         let isWin = false;
 

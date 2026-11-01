@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useResponsiveTable } from '../hooks/useResponsiveTable';
 import { PerformanceStats, DailySummary } from '../types/signals';
 import { getDailySummary, get7DaySummaries, updateDailySummary, formatDateYmd } from '../services/dailySummary';
 import {
@@ -33,6 +34,7 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
   onTriggerSettlement,
   isSettling = false,
 }) => {
+  const t1Ref = useResponsiveTable<HTMLTableElement>();
   const [todaySummary, setTodaySummary] = useState<DailySummary | null>(null);
   const [sevenDaySummaries, setSevenDaySummaries] = useState<DailySummary[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -268,7 +270,7 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-right text-xs">
+          <table ref={t1Ref} className="rtable w-full text-right text-xs">
             <thead>
               <tr className="border-b border-slate-800 text-slate-400 bg-slate-950/40">
                 <th className="py-3 px-4 font-semibold">التاريخ</th>

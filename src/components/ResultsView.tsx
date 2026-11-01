@@ -118,7 +118,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
         <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl">
           <button
             onClick={() => setSelectedAsset('all')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedAsset === 'all'
                 ? 'bg-slate-800 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
@@ -128,7 +128,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedAsset('metals')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedAsset === 'metals'
                 ? 'bg-slate-800 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
@@ -138,7 +138,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedAsset('energy')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedAsset === 'energy'
                 ? 'bg-slate-800 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
@@ -148,7 +148,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedAsset('forex-major')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedAsset === 'forex-major'
                 ? 'bg-slate-800 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
@@ -162,7 +162,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
         <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl">
           <button
             onClick={() => setSelectedStatus('all')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedStatus === 'all'
                 ? 'bg-slate-800 text-white'
                 : 'text-slate-400 hover:text-white'
@@ -172,7 +172,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedStatus('tp')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedStatus === 'tp'
                 ? 'bg-emerald-900/40 text-emerald-300'
                 : 'text-slate-400 hover:text-white'
@@ -182,7 +182,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedStatus('sl')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedStatus === 'sl'
                 ? 'bg-rose-900/40 text-rose-300'
                 : 'text-slate-400 hover:text-white'
@@ -192,7 +192,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
           </button>
           <button
             onClick={() => setSelectedStatus('open')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
               selectedStatus === 'open'
                 ? 'bg-sky-900/40 text-sky-300'
                 : 'text-slate-400 hover:text-white'

@@ -49,7 +49,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [selectedProvider, setSelectedProvider] = useState<'twelvedata' | 'finnhub' | 'alltick' | 'demo'>(
     apiConfig.provider || 'demo'
   );
-  const [apiKeyInput, setApiKeyInput] = useState<string>(apiConfig.apiKey);
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
   const [isTestingApi, setIsTestingApi] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
@@ -127,10 +127,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setIsTestingApi(false);
     setTestResult(res);
 
+    // SECURITY: the key is used once for verification and then discarded.
+    // It is never written to localStorage, never kept in React state, and
+    // never sent anywhere except our own /api/market/test endpoint.
+    setApiKeyInput('');
+
     if (res.success && onSaveApiConfig) {
       onSaveApiConfig({
         provider: selectedProvider,
-        apiKey: apiKeyInput.trim(),
+        apiKey: '',
         isCustomConnected: true,
       });
     }
@@ -276,7 +281,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                 <Key className="w-3.5 h-3.5 text-amber-400" />
-                <span>أدخل مفتاح الـ API الخاص بك ({selectedProvider === 'twelvedata' ? 'Twelve Data' : selectedProvider === 'alltick' ? 'AllTick' : 'Finnhub'} API Key):</span>
+                <span>أدخل مفتاح الـ API للتحقق منه ({selectedProvider === 'twelvedata' ? 'Twelve Data' : selectedProvider === 'alltick' ? 'AllTick' : 'Finnhub'} API Key):</span>
               </label>
               <a
                 href={selectedProvider === 'twelvedata' ? 'https://twelvedata.com/pricing' : selectedProvider === 'alltick' ? 'https://alltick.co/' : 'https://finnhub.io/register'}
@@ -292,6 +297,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex flex-col sm:flex-row items-center gap-2">
               <input
                 type="password"
+                autoComplete="off"
                 placeholder={selectedProvider === 'twelvedata' ? 'e.g. 74d89a20b...' : selectedProvider === 'alltick' ? 'e.g. token_...' : 'e.g. c123456789...'}
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
@@ -319,6 +325,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span>{testResult.message}</span>
               </div>
             )}
+
+            <p className="text-[11px] text-slate-500 leading-relaxed flex items-start gap-1.5">
+              <Shield className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+              <span>
+                المفتاح يُستخدم مرة واحدة للتحقق فقط ولا يُحفظ في المتصفح. للاستخدام الدائم، أضِفه
+                كمتغير بيئة على السيرفر (TWELVE_DATA_API_KEY / FINNHUB_API_KEY / ALLTICK_TOKEN).
+              </span>
+            </p>
           </div>
         )}
       </div>
@@ -339,7 +353,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span>إشعار التوصيات الصباحي (قبل افتتاح السوق الأوروبي بـ 30 دقيقة)</span>
               </div>
               <p className="text-slate-400 text-[11px] mt-0.5">
-                توليد ونشر التوصيات اليومية تلقائياً الساعة 07:30 بتوقيت جرينتش (09:30 القاهرة / 10:30 الرياض)
+                توليد ونشر التوصيات تلقائياً عند كل إغلاق شمعة 4 ساعات (00:00 · 04:00 · 08:00 · 12:00 · 16:00 · 20:00 UTC) — مع أولوية مضاعفة لشمعة افتتاح لندن 08:00 UTC
               </p>
             </div>
             <label className="relative inline-flex items-center cursor-pointer">

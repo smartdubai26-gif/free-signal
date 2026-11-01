@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useResponsiveTable } from '../hooks/useResponsiveTable';
 import { ALL_INSTRUMENTS } from '../services/mockData';
 import { LiveMarketRates } from '../services/liveMarketData';
 import {
@@ -32,6 +33,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
   lastSyncTime = Date.now(),
   onRefreshRates,
 }) => {
+  const t1Ref = useResponsiveTable<HTMLTableElement>();
   const [selectedAssetClass, setSelectedAssetClass] = useState<string>('all');
 
   const filteredInstruments = ALL_INSTRUMENTS.filter((inst) => {
@@ -139,7 +141,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
       <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit text-xs">
         <button
           onClick={() => setSelectedAssetClass('all')}
-          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
             selectedAssetClass === 'all'
               ? 'bg-slate-800 text-white'
               : 'text-slate-400 hover:text-white'
@@ -149,7 +151,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
         </button>
         <button
           onClick={() => setSelectedAssetClass('metals')}
-          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
             selectedAssetClass === 'metals'
               ? 'bg-slate-800 text-white'
               : 'text-slate-400 hover:text-white'
@@ -159,7 +161,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
         </button>
         <button
           onClick={() => setSelectedAssetClass('energy')}
-          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
             selectedAssetClass === 'energy'
               ? 'bg-slate-800 text-white'
               : 'text-slate-400 hover:text-white'
@@ -169,7 +171,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
         </button>
         <button
           onClick={() => setSelectedAssetClass('forex-major')}
-          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
             selectedAssetClass === 'forex-major'
               ? 'bg-slate-800 text-white'
               : 'text-slate-400 hover:text-white'
@@ -179,7 +181,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
         </button>
         <button
           onClick={() => setSelectedAssetClass('forex-minor')}
-          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-colors ${
             selectedAssetClass === 'forex-minor'
               ? 'bg-slate-800 text-white'
               : 'text-slate-400 hover:text-white'
@@ -192,7 +194,7 @@ export const TechnicalScannerView: React.FC<TechnicalScannerViewProps> = ({
       {/* Scanner Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         <div className="overflow-x-auto">
-          <table className="w-full text-xs text-right">
+          <table ref={t1Ref} className="rtable w-full text-xs text-right">
             <thead>
               <tr className="bg-slate-950/80 border-b border-slate-800 text-slate-400">
                 <th className="py-3.5 px-4 font-semibold">الأصل المالي</th>

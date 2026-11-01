@@ -12,6 +12,7 @@ import {
   OVERALL_PERFORMANCE,
   ALL_INSTRUMENTS,
   generateCandles,
+  buildSeedSignals,
 } from './services/mockData';
 import { evaluateSignalOutcome, calculateATR, calculatePips, runAutomatedMarketAnalysis, scanAndDiscoverNewOpportunities, clearDemoData } from './services/technicalEngine';
 import { fetchLiveMarketRates, fetchRealXauUsdCandle, LiveMarketRates, ApiConfig, getProviderHealth, ProviderHealth } from './services/liveMarketData';
@@ -19,6 +20,18 @@ import { saveSignal, getTodaySignals } from './services/signalRepository';
 import { runSettlement, closeExpiredSignals } from './services/settlementEngine';
 import { updateDailySummary } from './services/dailySummary';
 import { startScheduler } from './services/scheduler';
+import {
+  getMarketClock,
+  getMarketSessions,
+  classifySignal,
+  getAnalysisSchedule,
+  applyScanWeight,
+  formatMarketDateTime,
+  formatMarketDateTimeShort,
+  MARKET_TZ_LABEL_AR,
+  type MarketClock,
+  type AnalysisSchedule,
+} from './services/marketClock';
 import { SignalCard } from './components/SignalCard';
 import { SignalDetailModal } from './components/SignalDetailModal';
 import { ResultsView } from './components/ResultsView';
@@ -32,6 +45,7 @@ import { SettingsView } from './components/SettingsView';
 import { DisclaimerModal } from './components/DisclaimerModal';
 import { MSIDashboard } from './components/msi/MSIDashboard';
 import { PendingOrdersView } from './components/PendingOrdersView';
+import { MobileNav, DesktopNav, HeaderActions, type TabId } from './components/navigation/AppNav';
 import {
   TrendingUp,
   TrendingDown,
@@ -63,7 +77,6 @@ import {
 type TabType = 'today' | 'pending' | 'results' | 'performance' | 'analytics' | 'diagnostics' | 'production_test' | 'scanner' | 'archive' | 'settings' | 'msi';
 
 export default function App() {
-  console.log("Token status:", (import.meta as any).env.VITE_ALLTICK_TOKEN ? "FOUND" : "MISSING");
   const useMockData = (import.meta as any).env.VITE_USE_MOCK_DATA === 'true';
 
   const [activeTab, setActiveTab] = useState<TabType>('today');
@@ -76,13 +89,16 @@ export default function App() {
   const [isRunningEngine, setIsRunningEngine] = useState<boolean>(false);
   const [isSettling, setIsSettling] = useState<boolean>(false);
 
-  // API Configuration (Twelve Data, Finnhub, or Live Stream)
+  // API Configuration.
+  // SECURITY: no key is ever read from or written to localStorage. The provider
+  // selection is a UI preference only; credentials live in server env vars.
   const [apiConfig, setApiConfig] = useState<ApiConfig>(() => {
     try {
-      const saved = localStorage.getItem('alphafx_api_config');
-      return saved ? JSON.parse(saved) : { provider: 'twelvedata', apiKey: 'LIVE_PRO_FEED', isCustomConnected: true };
+      const saved = localStorage.getItem('alphafx_provider_pref');
+      const provider = saved ? JSON.parse(saved)?.provider : 'twelvedata';
+      return { provider: provider || 'twelvedata', apiKey: '', isCustomConnected: true };
     } catch {
-      return { provider: 'twelvedata', apiKey: 'LIVE_PRO_FEED', isCustomConnected: true };
+      return { provider: 'twelvedata', apiKey: '', isCustomConnected: true };
     }
   });
 
@@ -104,26 +120,33 @@ export default function App() {
   const [todaySignals, setTodaySignals] = useState<Signal[]>(() => {
     try {
       const saved = localStorage.getItem('alphafx_today_signals');
-      const todayDate = new Date().toISOString().split('T')[0];
+      // BUGFIX (the reported bug): the guard compared the stored signal's UTC
+      // date against `new Date().toISOString()` — the UTC date — while the rest
+      // of the app spoke Cairo time. Worse, when the dates did NOT match it fell
+      // through to `INITIAL_TODAY_SIGNALS`, which was itself stamped with
+      // today's date at a hard-coded 07:30Z. So on a Saturday the app happily
+      // re-seeded "today's opportunities" for a closed market.
+      //
+      // Now: the guard uses the Cairo calendar day, and the fallback is
+      // `buildSeedSignals()`, which knows the market is shut and returns
+      // explicitly EXPIRED setups instead of fake live ones.
+      const clock = getMarketClock();
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.cleared) return [];
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const signalDate = parsed[0].timestamp ? parsed[0].timestamp.split('T')[0] : '';
-          if (signalDate === todayDate) {
-            // Auto-upgrade if previous storage had legacy outdated entries (Gold > 4100 or USDJPY > 158.5)
-            const hasOutdatedEntries = parsed.some(
-              (s: Signal) => (s.symbol === 'XAU/USD' && s.entry > 4100) || (s.symbol === 'USD/JPY' && s.entry > 158.5)
-            );
-            if (!hasOutdatedEntries) {
-              return parsed;
-            }
-          }
+          // Keep only signals that are genuinely usable today: drop anything
+          // whose activation is in the future or belongs to a previous session.
+          const usable = parsed.filter((s: Signal) => {
+            const f = classifySignal(s, clock.nowMs);
+            return f !== 'invalid_future' && f !== 'stale';
+          });
+          if (usable.length > 0) return usable;
         }
       }
-      return INITIAL_TODAY_SIGNALS;
+      return buildSeedSignals(clock.nowMs);
     } catch {
-      return INITIAL_TODAY_SIGNALS;
+      return buildSeedSignals();
     }
   });
 
@@ -146,15 +169,22 @@ export default function App() {
   // Dynamic notification toast
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string } | null>(null);
 
-  // Countdown to next European market session (07:30 GMT)
-  const [sessionCountdown, setSessionCountdown] = useState<string>('04:22:15');
+  // Countdown to the next H4 candle close (the analysis trigger)
+  const [sessionCountdown, setSessionCountdown] = useState<string>('--:--:--');
   const [gmtTimeStr, setGmtTimeStr] = useState<string>('');
+  // Full H4 schedule: last scan, next scan, priority, weekend deferral.
+  const [analysisSchedule, setAnalysisSchedule] = useState<AnalysisSchedule>(() =>
+    getAnalysisSchedule()
+  );
+  // Live market clock — drives the closed-market banner and the session chips.
+  const [marketClock, setMarketClock] = useState<MarketClock>(() => getMarketClock());
 
-  // Save API config
+  // Save provider preference only — never the credential itself.
   const handleSaveApiConfig = (newConfig: ApiConfig) => {
-    setApiConfig(newConfig);
+    const safeConfig: ApiConfig = { ...newConfig, apiKey: '' };
+    setApiConfig(safeConfig);
     try {
-      localStorage.setItem('alphafx_api_config', JSON.stringify(newConfig));
+      localStorage.setItem('alphafx_provider_pref', JSON.stringify({ provider: safeConfig.provider }));
     } catch (e) {
       console.warn('Config save error', e);
     }
@@ -187,7 +217,15 @@ export default function App() {
   };
 
   // Trigger automated analysis engine, save to Supabase, and refresh UI state
-  const handleRunAnalysisEngine = useCallback(async () => {
+  /**
+   * Runs the analysis engine.
+   *
+   * `scanWeight` is the H4 session priority multiplier supplied by the
+   * scheduler: 1.15 for the 08:00 UTC London-open candle, 1.08 for the 12:00
+   * UTC London/New York overlap, 1 for the routine closes. Manual runs from the
+   * UI pass nothing and therefore use 1.
+   */
+  const handleRunAnalysisEngine = useCallback(async (scanWeight: number = 1) => {
     setIsRunningEngine(true);
     setToastMessage({
       title: 'محرك التحليل يفحص الأسواق ويحفظ التوصيات في قاعدة البيانات...',
@@ -202,7 +240,20 @@ export default function App() {
         generateCandles
       );
 
-      const validSignals = [...newSignals, ...updatedSignals].filter(
+      // Apply the session weight to freshly discovered opportunities only.
+      // Existing signals keep the confidence they were published with — a
+      // later scan must never silently re-grade a live recommendation.
+      const weightedNew = newSignals.map((s) => {
+        if (scanWeight === 1) return s;
+        const boosted = applyScanWeight(s.confidence, scanWeight);
+        return {
+          ...s,
+          confidence: boosted,
+          isTopOpportunity: boosted >= 85,
+        };
+      });
+
+      const validSignals = [...weightedNew, ...updatedSignals].filter(
         (s) => s.confidence >= 40 && s.direction !== 'NEUTRAL'
       );
 
@@ -349,81 +400,38 @@ export default function App() {
     return () => clearInterval(interval);
   }, [autoRefreshIntervalSecs, refreshRates]);
 
-  // Secure AllTick WebSocket Connection (WSS)
+  // Live feed status.
+  // SECURITY: the browser no longer opens a provider WebSocket directly, because
+  // that required putting the provider token in the URL. All market data now
+  // flows through /api/market/* on our own server.
   useEffect(() => {
-    const token = (import.meta as any).env?.VITE_ALLTICK_TOKEN || apiConfig?.apiKey || '';
-    const isRealToken = Boolean(
-      token &&
-      token !== 'LIVE_PRO_FEED' &&
-      !token.includes('placeholder') &&
-      !token.includes('token_889922') &&
-      token.length > 15
-    );
-
-    if (!isRealToken) {
-      setWsTokenMissing(true);
-      setIsLiveConnected(false);
-      return;
-    }
-    
-    setWsTokenMissing(false);
-    try {
-      const wsUrl = `wss://quote.alltick.co/quote-b-ws-api?token=${token}`;
-      const ws = new WebSocket(wsUrl);
-      
-      ws.onopen = (event) => {
-        console.log("WebSocket OPEN event:", event);
-        setIsLiveConnected(true);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'status') {
-            setIsLiveConnected(data.state === 'CONNECTED');
-          } else if (data.type === 'candle') {
-            console.log('Received live candle:', data.candle);
-          }
-        } catch (e) {
-          console.warn('WS message parse error', e);
-        }
-      };
-      
-      ws.onerror = () => {
-        console.warn("AllTick WebSocket feed notice (switching to REST fallback).");
-        setProviderHealth(getProviderHealth());
-      };
-
-      ws.onclose = () => {
-        setProviderHealth(getProviderHealth());
-      };
-      
-      return () => {
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          ws.close();
-        }
-      };
-    } catch (e) {
-      console.warn('WebSocket setup notice:', e);
-    }
-  }, [apiConfig]);
+    let cancelled = false;
+    fetch('/api/market/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((health) => {
+        if (cancelled || !health) return;
+        setWsTokenMissing(!health.alltick);
+        setIsLiveConnected(Boolean(health.alltick || health.twelvedata || health.finnhub));
+      })
+      .catch(() => {
+        if (!cancelled) setWsTokenMissing(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Immediate live rates refresh on mount
   useEffect(() => {
     refreshRates();
   }, [refreshRates]);
 
-  // Fetch real XAU/USD candle from AllTick REST endpoint on initial load
+  // Fetch the initial XAU/USD candle through our own proxy (no client token).
   useEffect(() => {
-    const token = (import.meta as any).env?.VITE_ALLTICK_TOKEN || apiConfig?.apiKey || '';
-    if (token && token !== 'LIVE_PRO_FEED') {
-      fetchRealXauUsdCandle(token).then((candleData) => {
-        if (candleData) {
-          console.log("Initial XAU/USD real candle fetched successfully:", candleData);
-        }
-      });
-    }
-  }, [apiConfig]);
+    fetchRealXauUsdCandle().catch(() => {
+      /* the rates endpoint already reports provider health */
+    });
+  }, []);
 
   // Load persisted signals from Supabase on mount
   useEffect(() => {
@@ -435,13 +443,16 @@ export default function App() {
     });
   }, []);
 
-  // Initialize automated trading lifecycle scheduler (Hourly settlement, Cairo 07:30, Cairo 23:00)
+  // Initialize automated trading lifecycle scheduler (H4 candle closes, hourly settlement, Cairo 23:00 EOD)
   useEffect(() => {
     const cleanup = startScheduler({
-      onRunAnalysis: async () => {
-        console.log('[Scheduler] Executing scheduled 07:30 Cairo market analysis');
-        await handleRunAnalysisEngine();
+      onRunAnalysis: async (closeMs, weight) => {
+        console.log(
+          `[Scheduler] Executing H4 close analysis for ${new Date(closeMs).toISOString()} (weight ${weight})`
+        );
+        await handleRunAnalysisEngine(weight);
       },
+      onScheduleChange: (schedule) => setAnalysisSchedule(schedule),
       onSettlementComplete: async (report) => {
         console.log('[Scheduler] Scheduled settlement complete:', report);
         const updated = await getTodaySignals();
@@ -456,6 +467,20 @@ export default function App() {
           setTodaySignals(updated);
         }
       },
+      // BUGFIX: when the week opens or closes, the list must change immediately.
+      // On close we re-seed as EXPIRED; on open we clear the stale set so the
+      // engine can produce genuine opportunities for the new session.
+      onMarketStateChange: (isOpen) => {
+        const clock = getMarketClock();
+        setMarketClock(clock);
+        if (!isOpen) {
+          setTodaySignals(buildSeedSignals(clock.nowMs));
+        } else {
+          setTodaySignals((prev) =>
+            prev.filter((s) => classifySignal(s, clock.nowMs) !== 'stale')
+          );
+        }
+      },
     });
 
     return cleanup;
@@ -466,10 +491,18 @@ export default function App() {
     refreshRates();
   }, [refreshRates]);
 
-  // World clock countdown
+  // H4 candle-close countdown
+  // BUGFIX: the countdown used to target a single daily 07:30 milestone while
+  // the engine now scans every H4 close. It also counted straight through the
+  // weekend to a Saturday "generation" that could not happen. Both are fixed:
+  // the target comes from getAnalysisSchedule(), which returns the next H4
+  // close while open and the week-open instant while closed.
   useEffect(() => {
     const updateClocks = () => {
       const now = new Date();
+      const clock = getMarketClock(now.getTime());
+      setMarketClock(clock);
+
       setGmtTimeStr(
         now.toLocaleTimeString('en-GB', {
           timeZone: 'UTC',
@@ -480,13 +513,10 @@ export default function App() {
         }) + ' GMT'
       );
 
-      // Compute time remaining until 07:30 UTC
-      const target = new Date();
-      target.setUTCHours(7, 30, 0, 0);
-      if (now.getTime() > target.getTime()) {
-        target.setUTCDate(target.getUTCDate() + 1);
-      }
-      const diffMs = target.getTime() - now.getTime();
+      const schedule = getAnalysisSchedule(now.getTime());
+      setAnalysisSchedule(schedule);
+
+      const diffMs = schedule.msUntilNext;
       const hours = Math.floor(diffMs / (1000 * 60 * 60));
       const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
       const secs = Math.floor((diffMs % (1000 * 60)) / 1000);
@@ -571,8 +601,10 @@ export default function App() {
   const handleResetData = () => {
     localStorage.removeItem('alphafx_today_signals');
     localStorage.removeItem('alphafx_historical_signals');
+    localStorage.removeItem('alphafx_provider_pref');
+    // Purge any credential left behind by an older build of this app.
     localStorage.removeItem('alphafx_api_config');
-    setTodaySignals(INITIAL_TODAY_SIGNALS);
+    setTodaySignals(buildSeedSignals());
     setHistoricalSignals(HISTORICAL_SIGNALS);
     setApiConfig({ provider: 'demo', apiKey: '', isCustomConnected: false });
     setToastMessage({
@@ -582,302 +614,146 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  /**
+   * Header "تصفير وإعادة فحص" action.
+   *
+   * Identical behaviour to the old inline handler, extracted so the header can
+   * stay presentational. Kept out of the reset-data path above because it also
+   * re-runs the analysis engine.
+   */
+  const handleResetAndRescan = useCallback(() => {
+    localStorage.removeItem('alphafx_today_signals');
+    setTodaySignals([]);
+    setToastMessage({
+      title: 'تم مسح البيانات',
+      desc: 'تم مسح كافة الصفقات القديمة. ابدأ الآن بفحص السوق.',
+    });
+    handleRunAnalysisEngine();
+  }, [handleRunAnalysisEngine]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
-      {/* Persistent Regulatory Risk Banner */}
-      <div className="bg-amber-950/40 border-b border-amber-900/40 text-amber-300/90 px-4 py-1.5 text-[11px] sm:text-xs">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 truncate">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="truncate">
+      {/* Persistent Regulatory Risk Banner.
+          On a phone the single truncated line cut the sentence off mid-word;
+          the text now wraps to two/three lines and the link stays reachable. */}
+      <div className="bg-amber-950/40 border-b border-amber-900/40 text-amber-300/90 px-3 sm:px-4 py-1.5 text-[11px] sm:text-xs">
+        <div className="max-w-7xl mx-auto flex items-start sm:items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-start sm:items-center gap-2 min-w-0">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+            <span className="leading-snug line-clamp-2 sm:line-clamp-none">
               <strong>إخلاء مسؤولية تنظيمي:</strong> التطبيق يقدم توصيات ونماذج تحليلية فنية فقط. لا يتصل بأي وسيط مالي ولا ينفذ صفقات. القرار الاستثماري النهائي يقع على عاتق المستخدم وحده.
             </span>
           </div>
           <button
             onClick={() => setShowDisclaimerModal(true)}
-            className="shrink-0 underline hover:text-white transition-colors cursor-pointer"
+            className="shrink-0 underline hover:text-white transition-colors cursor-pointer min-h-[36px] px-1 flex items-center text-[11px] sm:text-xs"
           >
             التفاصيل
           </button>
         </div>
       </div>
 
-      {/* Top Bar Navigation (Strict 3-Zone Contract) */}
-      <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-4 sm:px-8 py-3.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-8">
-          {/* Zone 1: Single text element wordmark */}
-          <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-extrabold text-sm shadow-md">
+      {/* ── Top Bar ────────────────────────────────────────────────
+           Rebuilt for phones. The old header packed the wordmark, two
+           labelled action buttons and an 11-item tab strip into one row;
+           at 375px that row measured 499px and pushed 140px of the document
+           off-screen. Now the top row is wordmark + icon-only actions, and
+           navigation gets its own rows via <MobileNav> / <DesktopNav>. */}
+      <header className="sticky top-0 z-40 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-6 lg:px-8 py-2.5">
+        <div className="max-w-7xl mx-auto flex items-center gap-3">
+          {/* Wordmark — truncates instead of widening the row */}
+          <div className="flex items-center gap-2 shrink min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-extrabold text-sm shadow-md shrink-0">
               αFX
             </div>
-            <a href="#" className="text-lg font-bold tracking-tight text-white font-mono">
-              AlphaFX Signals
+            <a
+              href="#"
+              onClick={(e) => e.preventDefault()}
+              className="text-base sm:text-lg font-bold tracking-tight text-white font-mono truncate"
+            >
+              <span className="hidden sm:inline">AlphaFX Signals</span>
+              <span className="sm:hidden">AlphaFX</span>
             </a>
           </div>
 
-          {/* Zone 2: 4-5 concise single-line nav links */}
-          <nav className="hidden md:flex items-center gap-6 text-xs sm:text-sm font-medium text-slate-300">
-            <button
-              onClick={() => setActiveTab('today')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'today' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              توصيات اليوم
-            </button>
-            <button
-              onClick={() => setActiveTab('pending')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 flex items-center gap-1 ${
-                activeTab === 'pending' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              <Clock className="w-3.5 h-3.5 text-amber-400" />
-              <span>الفرص المعلقة</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('results')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'results' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              تقرير النتائج
-            </button>
-            <button
-              onClick={() => setActiveTab('performance')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'performance' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              لوحة الأداء (Win Rate)
-            </button>
-            <button
-              onClick={() => setActiveTab('analytics')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'analytics' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              التحليلات الشاملة
-            </button>
-            <button
-              onClick={() => setActiveTab('diagnostics')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'diagnostics' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              الفحص والتشخيص
-            </button>
-            <button
-              onClick={() => setActiveTab('production_test')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'production_test' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              اختبار الإنتاج (5 أيام)
-            </button>
-            <button
-              onClick={() => setActiveTab('scanner')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'scanner' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              محرك التحليل والمؤشرات
-            </button>
-            <button
-              onClick={() => setActiveTab('archive')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'archive' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              الأرشيف
-            </button>
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === 'settings' ? 'text-amber-400 font-bold border-b-2 border-amber-400' : ''
-              }`}
-            >
-              الإعدادات
-            </button>
-            <button
-              onClick={() => setActiveTab('msi')}
-              className={`flex items-center gap-1.5 hover:text-amber-400 transition-colors whitespace-nowrap shrink-0 pb-0.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 ${
-                activeTab === 'msi' ? 'text-amber-300 font-bold bg-amber-500/20 border-amber-400' : 'text-amber-400/90'
-              }`}
-            >
-              <Cpu className="w-3.5 h-3.5" />
-              <span>MSI Intelligence</span>
-            </button>
-          </nav>
+          <DesktopNav activeTab={activeTab} onChange={setActiveTab} />
 
-          {/* Zone 3: Primary actions */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => {
-                localStorage.removeItem('alphafx_today_signals');
-                setTodaySignals([]);
-                setToastMessage({ title: 'تم مسح البيانات', desc: 'تم مسح كافة الصفقات القديمة. ابدأ الآن بفحص السوق.' });
-                handleRunAnalysisEngine();
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-rose-100 bg-rose-900/50 border border-rose-800 rounded-lg hover:bg-rose-900 transition-all shadow-md whitespace-nowrap shrink-0 active:scale-95"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>تصفير وإعادة فحص</span>
-            </button>
-            <button
-              onClick={handleRunAnalysisEngine}
-              disabled={isRunningEngine}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-950 bg-gradient-to-r from-amber-400 to-amber-500 rounded-lg hover:from-amber-300 hover:to-amber-400 transition-all shadow-md whitespace-nowrap shrink-0 active:scale-95 disabled:opacity-50"
-            >
-              <Zap className="w-3.5 h-3.5 fill-slate-950" />
-              <span>{isRunningEngine ? 'فحص السوق...' : 'تشغيل التحليل'}</span>
-            </button>
+          <div className="ms-auto flex items-center shrink-0">
+            <HeaderActions
+              isRunning={isRunningEngine}
+              onRun={handleRunAnalysisEngine}
+              onReset={handleResetAndRescan}
+            />
           </div>
         </div>
 
-        {/* Mobile Nav Strip */}
-        <div className="flex md:hidden items-center justify-between gap-1 overflow-x-auto pt-3 border-t border-slate-800/60 mt-2 text-xs">
-          <button
-            onClick={() => setActiveTab('today')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'today' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            توصيات اليوم
-          </button>
-          <button
-            onClick={() => setActiveTab('pending')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'pending' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            الفرص المعلقة
-          </button>
-          <button
-            onClick={() => setActiveTab('results')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'results' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            النتائج
-          </button>
-          <button
-            onClick={() => setActiveTab('performance')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'performance' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            الأداء
-          </button>
-          <button
-            onClick={() => setActiveTab('analytics')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'analytics' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            التحليلات
-          </button>
-          <button
-            onClick={() => setActiveTab('diagnostics')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'diagnostics' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            التشخيص
-          </button>
-          <button
-            onClick={() => setActiveTab('production_test')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'production_test' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            اختبار الإنتاج
-          </button>
-          <button
-            onClick={() => setActiveTab('scanner')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'scanner' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            المحرك
-          </button>
-          <button
-            onClick={() => setActiveTab('archive')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'archive' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            الأرشيف
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap ${
-              activeTab === 'settings' ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-400'
-            }`}
-          >
-            الإعدادات
-          </button>
-          <button
-            onClick={() => setActiveTab('msi')}
-            className={`px-2.5 py-1 rounded whitespace-nowrap flex items-center gap-1 ${
-              activeTab === 'msi' ? 'bg-amber-500/20 text-amber-300 font-bold border border-amber-400/40' : 'text-amber-400/80'
-            }`}
-          >
-            <Cpu className="w-3 h-3" />
-            <span>MSI</span>
-          </button>
-        </div>
+        <MobileNav activeTab={activeTab} onChange={setActiveTab} />
       </header>
 
-      {/* Continuous Provider Status Banner with Red Alert on Token Failure */}
+      {/* Continuous Provider Status Banner with Red Alert on Token Failure.
+          The raw provider error is technical English; on a phone it was mixed
+          inline with the Arabic sentence and pushed the layout around. It is
+          now its own LTR line, truncated, with the full text on hover. */}
       {providerHealth.alltick.status === 'red' ? (
-        <div className="bg-rose-950/80 border-b border-rose-800/60 text-rose-200 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 font-mono">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
-            <span className="font-bold text-rose-300">🔴 تنبيه مزود AllTick:</span>
-            <span>{providerHealth.alltick.message}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-            <span className="text-emerald-300 font-bold">🟢 البث الحي الاحتياطي متصل ومستمر:</span>
-            <span className="text-slate-300">الفرص وأسعار السوق تعمل وتتحدث لحظياً كل {autoRefreshIntervalSecs} ثوانٍ.</span>
+        <div className="bg-rose-950/80 border-b border-rose-800/60 text-rose-200 px-3 sm:px-4 py-2 text-xs font-mono">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-2">
+            <div className="flex items-start sm:items-center gap-2 min-w-0">
+              <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0 mt-1 sm:mt-0"></span>
+              <span className="font-bold text-rose-300 shrink-0">🔴 تنبيه مزود AllTick:</span>
+              <span
+                dir="ltr"
+                title={providerHealth.alltick.message}
+                className="text-rose-200/80 text-[11px] truncate min-w-0 flex-1 text-left"
+              >
+                {providerHealth.alltick.message}
+              </span>
+            </div>
+            <div className="flex items-start sm:items-center gap-2 min-w-0">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0 mt-1 sm:mt-0"></span>
+              <span className="text-emerald-300 font-bold shrink-0">🟢 البث الحي الاحتياطي:</span>
+              <span className="text-slate-300">الفرص تعمل وتتحدث كل {autoRefreshIntervalSecs} ثانية.</span>
+            </div>
           </div>
         </div>
       ) : (
-        <div className="bg-emerald-950/60 border-b border-emerald-800/40 text-emerald-200 px-4 py-1.5 text-xs flex items-center justify-between font-mono">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="font-bold text-emerald-300">🟢 مزود AllTick متصل بنجاح:</span>
-            <span>بث الأسعار الحية يعمل باستمرار</span>
+        <div className="bg-emerald-950/60 border-b border-emerald-800/40 text-emerald-200 px-3 sm:px-4 py-1.5 text-xs font-mono">
+          <div className="max-w-7xl mx-auto flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+            <span className="font-bold text-emerald-300 shrink-0">🟢 مزود AllTick:</span>
+            <span className="truncate">بث الأسعار الحية يعمل باستمرار</span>
           </div>
         </div>
       )}
 
-      {/* Live Market Rates Mini Ticker Bar */}
-      <div className="bg-slate-900/90 border-b border-slate-800/80 px-4 sm:px-8 py-2 text-xs overflow-x-auto">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 shrink-0">
+      {/* Live Market Rates Mini Ticker Bar.
+          Previously the whole bar was `overflow-x-auto`, which dragged the
+          provider pill off-screen with the prices and left the page scroller
+          active. Now only the price list scrolls. */}
+      <div className="bg-slate-900/90 border-b border-slate-800/80 px-3 sm:px-8 py-2 text-xs">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
             <button
               onClick={() => setShowLiveSourceModal(true)}
-              className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-colors cursor-pointer ${
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors cursor-pointer max-w-full min-w-0 ${
                 providerHealth.alltick.status === 'red'
                   ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25'
                   : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25'
               }`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${providerHealth.alltick.status === 'red' ? 'bg-rose-400 animate-pulse' : 'bg-emerald-400 animate-pulse'}`}></span>
-              <span>
+              <span className={`w-1.5 h-1.5 shrink-0 rounded-full ${providerHealth.alltick.status === 'red' ? 'bg-rose-400 animate-pulse' : 'bg-emerald-400 animate-pulse'}`}></span>
+              <span className="truncate">
                 {providerHealth.alltick.status === 'red'
                   ? '🔴 AllTick (401) · 🟢 البث الحي متصل'
                   : '🟢 بث حي متصل ومستمر'}
               </span>
-              <Info className="w-3 h-3 ml-0.5" />
+              <Info className="w-3 h-3 ml-0.5 shrink-0" />
             </button>
             <span className="text-slate-400 text-[11px] hidden sm:inline">
               الأسعار الحية اللحظية:
             </span>
           </div>
 
-          <div className="flex items-center gap-4 font-mono text-[11px] text-slate-300 overflow-x-auto whitespace-nowrap">
+          <div className="scroll-hint flex items-center gap-3 sm:gap-4 font-mono text-[11px] text-slate-300 overflow-x-auto no-scrollbar whitespace-nowrap -mx-3 px-3 sm:mx-0 sm:px-0 py-0.5">
             {/* EUR/USD */}
             <div className="flex items-center gap-1">
               <span className="text-sky-400 font-bold">EUR/USD:</span>
@@ -941,7 +817,7 @@ export default function App() {
               <button
                 onClick={refreshRates}
                 title="مزامنة الأسعار اللحظية"
-                className="p-1 hover:text-white text-slate-400 transition-colors"
+                className="tap-h flex items-center justify-center px-1.5 hover:text-white text-slate-400 transition-colors rounded-lg"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
               </button>
@@ -951,7 +827,7 @@ export default function App() {
       </div>
 
       {/* Main Viewport Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6 space-y-6 relative">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-8 py-4 sm:py-6 space-y-4 sm:space-y-6 relative">
         {/* Global Loading Overlay when Analysis Engine is Running */}
         {isRunningEngine && (
           <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -966,7 +842,7 @@ export default function App() {
         )}
         {/* Dynamic Toast Message */}
         {toastMessage && (
-          <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-slate-900 border border-amber-500/50 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center justify-between gap-4 max-w-md w-full animate-in fade-in slide-in-from-top-4">
+          <div className="fixed top-20 sm:top-24 inset-x-3 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 z-50 bg-slate-900 border border-amber-500/50 text-white px-4 sm:px-5 py-3 rounded-xl shadow-2xl flex items-center justify-between gap-3 sm:gap-4 sm:max-w-md mx-auto animate-in fade-in slide-in-from-top-4">
             <div>
               <div className="font-bold text-xs text-amber-400">{toastMessage.title}</div>
               <p className="text-xs text-slate-300 mt-0.5">{toastMessage.desc}</p>
@@ -986,39 +862,118 @@ export default function App() {
         {/* Tab 1: Today's Recommendations */}
         {activeTab === 'today' && (
           <div className="space-y-6">
-            {/* Critical Timing & Market Session Bar */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
-              {/* European Open Countdown */}
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                  <Clock className="w-6 h-6 text-amber-400" />
+            {/* ── Market-closed banner ──────────────────────────────────
+                BUGFIX (the reported bug): the app had no concept of a closed
+                market, so on a Saturday it presented Friday's setups as
+                "today's opportunities" with a Saturday activation time.
+                This banner states the truth and explains what the list below
+                actually contains. */}
+            {!marketClock.isOpen && (
+              <div className="rounded-2xl border border-amber-600/50 bg-amber-950/30 p-4 sm:p-5 shadow-xl">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-bold text-amber-300">
+                        السوق مغلق الآن — لا توجد فرص جديدة اليوم
+                      </h3>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/40 font-mono">
+                        MARKET CLOSED
+                      </span>
+                    </div>
+                    <p className="text-xs text-amber-100/80 mt-1 leading-relaxed">
+                      {marketClock.closedReasonAr}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-[11px] font-mono text-amber-200/90">
+                      <span>
+                        🕐 الآن: {formatMarketDateTime(new Date(marketClock.nowMs).toISOString())} ({MARKET_TZ_LABEL_AR})
+                      </span>
+                      <span>
+                        🔓 يُفتح التداول: {formatMarketDateTime(new Date(marketClock.nextOpenMs).toISOString())}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-amber-100/60 mt-2 leading-relaxed">
+                      الإشارات المعروضة أدناه هي آخر إعدادات صادرة من الجلسة السابقة، وتم
+                      وسمها <strong className="text-amber-200">«منتهية»</strong> — وليست فرصاً
+                      قابلة للتنفيذ الآن. لن يُولّد المحرك أي فرصة جديدة حتى إعادة فتح السوق.
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <div className="flex items-center gap-2">
+              </div>
+            )}
+
+            {/* H4 Scan Schedule Bar */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
+              {/* Next H4 close countdown */}
+              <div className="flex items-start sm:items-center gap-3 sm:gap-4 min-w-0">
+                <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
+                  <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="text-xs font-semibold text-amber-400">
-                      التوقيت الحرج لإصدار التوصيات
+                      الفحص القادم — إغلاق شمعة 4 ساعات
                     </span>
                     <span className="text-[11px] text-slate-400">
-                      (07:30 GMT قبل افتتاح السوق الأوروبي)
+                      (00:00 · 04:00 · 08:00 · 12:00 · 16:00 · 20:00 UTC)
                     </span>
                   </div>
-                  <div className="flex items-baseline gap-2 mt-0.5">
-                    <span className="text-xl sm:text-2xl font-bold font-mono text-white">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mt-0.5">
+                    <span className="text-xl sm:text-2xl font-bold font-mono text-white tabular-nums">
                       {sessionCountdown}
                     </span>
-                    <span className="text-xs text-slate-400 font-mono">
-                      متبقي على التوليد القادم · الوقت الحالي: {gmtTimeStr}
+                    <span className="text-[11px] sm:text-xs text-slate-400 font-mono">
+                      متبقي · الآن {gmtTimeStr}
                     </span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${
+                        analysisSchedule.nextPriority.priority === 'london_open'
+                          ? 'bg-sky-500/15 border-sky-500/40 text-sky-300'
+                          : analysisSchedule.nextPriority.priority === 'overlap'
+                          ? 'bg-violet-500/15 border-violet-500/40 text-violet-300'
+                          : 'bg-slate-800/80 border-slate-700 text-slate-400'
+                      }`}
+                    >
+                      {analysisSchedule.nextPriority.labelAr}
+                    </span>
+                    {analysisSchedule.deferredFromWeekend && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full border bg-amber-500/15 border-amber-500/40 text-amber-300 font-medium">
+                        مؤجَّل من العطلة
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* World Sessions Status */}
+              {/* Last scan + timezone */}
+              <div className="flex flex-col gap-1.5 text-[11px] sm:text-xs border-t lg:border-t-0 lg:border-r border-slate-800 pt-3 lg:pt-0 lg:pr-4 min-w-0">
+                <div className="flex flex-wrap items-baseline gap-x-1.5">
+                  <span className="text-slate-500 shrink-0">آخر فحص:</span>
+                  <span className="text-slate-300 font-mono">
+                    {formatMarketDateTimeShort(new Date(analysisSchedule.lastCheckMs).toISOString())}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-baseline gap-x-1.5">
+                  <span className="text-slate-500 shrink-0">الفحص القادم:</span>
+                  <span className="text-slate-300 font-mono">
+                    {formatMarketDateTimeShort(new Date(analysisSchedule.nextCheckMs).toISOString())}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  جميع الأوقات بـ {MARKET_TZ_LABEL_AR} مع إزاحة صريحة
+                </div>
+              </div>
+
+              {/* World Sessions Status — computed live, not hard-coded */}
               <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-                {MARKET_SESSIONS.map((sess) => (
+                {getMarketSessions(marketClock.nowMs).map((sess) => (
                   <div
                     key={sess.id}
-                    className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                    className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg border flex items-center gap-1.5 ${
                       sess.isOpen
                         ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
                         : 'bg-slate-950/60 border-slate-800 text-slate-500'
@@ -1044,7 +999,7 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800">
                 <button
                   onClick={() => setSelectedAssetFilter('forex-major')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
+                  className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
                     selectedAssetFilter === 'forex-major'
                       ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -1058,7 +1013,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => setSelectedAssetFilter('metals')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
+                  className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
                     selectedAssetFilter === 'metals'
                       ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -1072,7 +1027,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => setSelectedAssetFilter('energy')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
+                  className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
                     selectedAssetFilter === 'energy'
                       ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -1083,7 +1038,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => setSelectedAssetFilter('all')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
+                  className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
                     selectedAssetFilter === 'all'
                       ? 'bg-slate-800 text-white font-bold shadow-sm'
                       : 'text-slate-400 hover:text-white'
@@ -1101,7 +1056,7 @@ export default function App() {
                   <button
                     key={curr}
                     onClick={() => setSelectedCurrencyFilter(curr as any)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                    className={`px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-lg text-xs font-medium transition-all ${
                       selectedCurrencyFilter === curr
                         ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold'
                         : 'text-slate-400 hover:text-white'
@@ -1160,7 +1115,7 @@ export default function App() {
                       setAutoRefreshIntervalSecs(val);
                       setSecondsToNextRefresh(val || 30);
                     }}
-                    className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded px-2 py-0.5 focus:outline-none focus:border-amber-400"
+                    className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-2 sm:py-0.5 min-h-[44px] sm:min-h-0 focus:outline-none focus:border-amber-400"
                   >
                     <option value={30}>كل 30 ثانية</option>
                     <option value={60}>كل دقيقة</option>
@@ -1183,7 +1138,7 @@ export default function App() {
                   }}
                   disabled={isRunningEngine}
                   title="مزامنة الأسعار اللحظية وفحص الأسواق بحثاً عن فرص جديدة"
-                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                  className="tap-h flex items-center justify-center gap-1.5 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 whitespace-nowrap cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRunningEngine ? 'animate-spin' : ''}`} />
                   <span>{isRunningEngine ? 'جاري الفحص...' : '🔄 فحص السوق وتحديث الفرص الآن'}</span>
@@ -1193,7 +1148,7 @@ export default function App() {
                   onClick={handleRunSettlement}
                   disabled={isSettling}
                   title="فحص أسعار السوق الحالية لتفعيل المعلقات وحسم الأهداف ووقف الخسارة في Supabase"
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                  className="tap-h flex items-center justify-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 whitespace-nowrap cursor-pointer disabled:opacity-50"
                 >
                   <Play className={`w-3.5 h-3.5 ${isSettling ? 'animate-spin' : 'fill-white'}`} />
                   <span>{isSettling ? 'جارٍ التسوية...' : '⚡ تشغيل التسوية الآن'}</span>
@@ -1254,9 +1209,9 @@ export default function App() {
                 </div>
 
                 <button
-                  onClick={handleRunAnalysisEngine}
+                  onClick={() => handleRunAnalysisEngine()}
                   disabled={isRunningEngine}
-                  className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all active:scale-95 whitespace-nowrap shrink-0"
+                  className="tap-h flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all active:scale-95 whitespace-nowrap shrink-0"
                 >
                   <Zap className={`w-3.5 h-3.5 fill-slate-950 ${isRunningEngine ? 'animate-spin' : ''}`} />
                   <span>{isRunningEngine ? 'جارِ فحص السوق...' : 'إعادة فحص وتحديث الفرص'}</span>
@@ -1361,23 +1316,35 @@ export default function App() {
                   )}
                   <button
                     onClick={() => {
-                      setTodaySignals(INITIAL_TODAY_SIGNALS);
+                      // BUGFIX: this used the module-level INITIAL_TODAY_SIGNALS
+                      // snapshot, which was frozen at page-load time and always
+                      // claimed a 07:30 activation. Rebuild from the live clock
+                      // so the reloaded set is honest about the current session.
+                      const seeds = buildSeedSignals();
+                      setTodaySignals(seeds);
                       try {
-                        localStorage.setItem('alphafx_today_signals', JSON.stringify(INITIAL_TODAY_SIGNALS));
+                        localStorage.setItem('alphafx_today_signals', JSON.stringify(seeds));
                       } catch {}
                       setToastMessage({
-                        title: 'تم استعادة باقة توصيات اليوم',
-                        desc: `تم تحميل ${INITIAL_TODAY_SIGNALS.length} فرص تداول للذهب والعملات والنفط بنجاح`,
+                        title: marketClock.isOpen
+                          ? 'تم استعادة باقة توصيات اليوم'
+                          : 'تم استعادة آخر إعدادات الجلسة السابقة',
+                        desc: marketClock.isOpen
+                          ? `تم تحميل ${seeds.length} فرصة تداول للذهب والعملات والنفط بنجاح`
+                          : `السوق مغلق — تم تحميل ${seeds.length} إعداد موسوم «منتهية» من الجلسة السابقة`,
                       });
                       setTimeout(() => setToastMessage(null), 3000);
                     }}
                     className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-md flex items-center gap-1.5"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
-                    <span>تحميل فرص اليوم الأساسية ({INITIAL_TODAY_SIGNALS.length} فرص)</span>
+                    <span>
+                      {marketClock.isOpen ? 'تحميل فرص اليوم الأساسية' : 'تحميل إعدادات الجلسة السابقة'} (
+                      {INITIAL_TODAY_SIGNALS.length} فرص)
+                    </span>
                   </button>
                   <button
-                    onClick={handleRunAnalysisEngine}
+                    onClick={() => handleRunAnalysisEngine()}
                     disabled={isRunningEngine}
                     className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition-all border border-slate-700 flex items-center gap-1.5"
                   >
@@ -1552,7 +1519,7 @@ export default function App() {
           <div className="flex items-center gap-4">
             <button
               onClick={() => setShowDisclaimerModal(true)}
-              className="hover:text-slate-300 transition-colors"
+              className="hover:text-slate-300 transition-colors min-h-[36px] flex items-center"
             >
               بيان إخلاء المسؤولية
             </button>

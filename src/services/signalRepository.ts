@@ -1,5 +1,20 @@
 import { supabase } from './supabaseClient';
 import { Signal, SignalDirection, Timeframe, SignalStatus } from '../types/signals';
+import { getMarketClock, cairoDayStartUtcIso, cairoDayEndUtcIso } from './marketClock';
+
+/**
+ * Converts a Cairo calendar date (YYYY-MM-DD) into the real UTC half-open
+ * range [start, end) that the database should be filtered on.
+ */
+function cairoDayRangeUtcIso(dateStr: string): { startIso: string; endIso: string } {
+  // Anchor at Cairo noon so DST transitions can never push us into the
+  // neighbouring day.
+  const anchorMs = new Date(`${dateStr}T12:00:00.000Z`).getTime();
+  return {
+    startIso: cairoDayStartUtcIso(anchorMs),
+    endIso: cairoDayEndUtcIso(anchorMs),
+  };
+}
 
 export interface DbSignalRecord {
   id?: string;
@@ -92,11 +107,27 @@ export function validateSignalForProduction(sig: Signal): void {
     throw new Error(`SHORT: TP1 (${tp1}) must be below entry (${sig.entry})`);
   }
 
-  // Sanity: Check if timestamp is in the future
+  // Sanity: Check if timestamp is in the future.
+  // BUGFIX: this was the ONLY date guard in the whole codebase, and it only
+  // caught future timestamps. It never rejected a Saturday. Now a signal is
+  // also rejected when its activation lands inside the closed FX week.
   const now = new Date();
   const sigDate = sig.timestamp ? new Date(sig.timestamp) : now;
   if (sigDate.getTime() > now.getTime() + 60000) {
     throw new Error(`Signal timestamp cannot be in the future: ${sig.timestamp}`);
+  }
+  const activationMs = sig.activated_at ? new Date(sig.activated_at).getTime() : null;
+  if (activationMs !== null && Number.isFinite(activationMs)) {
+    if (activationMs > now.getTime() + 60000) {
+      throw new Error(`Signal activation cannot be in the future: ${sig.activated_at}`);
+    }
+    const clock = getMarketClock(now.getTime());
+    if (!clock.isOpen && activationMs > clock.lastOpenMs) {
+      throw new Error(
+        `Cannot activate a signal while the FX market is closed (${clock.closedReasonAr}). ` +
+          `Last valid session open was ${new Date(clock.lastOpenMs).toISOString()}.`
+      );
+    }
   }
 }
 
@@ -108,8 +139,11 @@ export async function saveSignal(signal: Signal): Promise<boolean> {
     // Enforce hard production integrity guard before doing anything
     validateSignalForProduction(signal);
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // BUGFIX: `setHours(0,0,0,0)` used the DEVICE's midnight while the stored
+    // column is UTC. On a device in UTC+2 the "today" window started 22:00Z
+    // the previous day, so the duplicate check compared against the wrong
+    // window and could both miss real duplicates and block fresh signals.
+    const todayStart = new Date(getMarketClock().dayStartUtcIso);
 
     // 1. Check for existing duplicate today
     const { data: existing, error: queryError } = await supabase
@@ -227,8 +261,8 @@ export function mapRowToSignal(row: any): Signal {
  */
 export async function getTodaySignals(): Promise<Signal[]> {
   try {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // BUGFIX: same device-midnight bug as saveSignal — use the Cairo day start.
+    const todayStart = new Date(getMarketClock().dayStartUtcIso);
 
     const { data, error } = await supabase
       .from('signals')
@@ -253,14 +287,16 @@ export async function getTodaySignals(): Promise<Signal[]> {
  */
 export async function getSignalsByDate(dateStr: string): Promise<Signal[]> {
   try {
-    const start = new Date(`${dateStr}T00:00:00.000Z`);
-    const end = new Date(`${dateStr}T23:59:59.999Z`);
+    // BUGFIX: `${dateStr}T00:00:00.000Z` treats the Cairo calendar day as UTC.
+    // "2026-10-31" in Cairo begins at 2026-10-30T22:00Z, so 2–3 hours of every
+    // day's signals were attributed to the wrong date.
+    const { startIso, endIso } = cairoDayRangeUtcIso(dateStr);
 
     const { data, error } = await supabase
       .from('signals')
       .select('*')
-      .gte('created_at', start.toISOString())
-      .lte('created_at', end.toISOString())
+      .gte('created_at', startIso)
+      .lt('created_at', endIso)
       .order('created_at', { ascending: true });
 
     if (error || !data) {

@@ -1,0 +1,9 @@
+# robots.txt — AlphaFX Commodities
+User-agent: *
+Allow: /
+
+# لا تُفهرس مسارات الـ API أو ملفات البناء
+Disallow: /api/
+Disallow: /assets/
+
+Sitemap: https://free-signal-ten.vercel.app/sitemap.xml

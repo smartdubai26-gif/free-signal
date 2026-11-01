@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Signal } from '../types/signals';
 import { InteractiveChart } from './InteractiveChart';
+import { formatMarketDateTime, classifySignal, MARKET_TZ_LABEL_AR } from '../services/marketClock';
 import {
   X,
   TrendingUp,
@@ -35,16 +36,9 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
   const formatPrice = (val: number) => val.toFixed(signal.pipValueDecimals);
 
   const formatTimestamp = (ts?: string): string => {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return '—';
-    return d.toLocaleString('ar-EG', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+    // BUGFIX: was `toLocaleString('ar-EG')` with no timeZone — the device zone.
+    // Now always the market zone, with an explicit offset label.
+    return formatMarketDateTime(ts);
   };
 
   const formatDuration = (activatedAt?: string, closedAt?: string): string => {
@@ -121,8 +115,8 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md overflow-y-auto">
-      <div className="relative w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-200">
+    <div className="modal-shell fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md overflow-y-auto">
+      <div className="modal-panel relative w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-200">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-950/60">
           <div className="flex items-center gap-3">
@@ -180,7 +174,7 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-6 space-y-6 max-h-[80vh] overflow-y-auto">
+        <div className="modal-body p-3.5 sm:p-6 space-y-4 sm:space-y-6 max-h-[80vh] overflow-y-auto">
           {/* Visual Signal Lifecycle Timeline */}
           <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800 shadow-inner">
             <div className="flex items-center justify-between mb-3">

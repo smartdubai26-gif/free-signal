@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient';
-import { getEnvToken, fetchLiveMarketRates } from './liveMarketData';
+import { fetchLiveMarketRates } from './liveMarketData';
 import { DiagnosticReport, DiagnosticItem, AssetFreshness, PipelineHealth } from '../types/signals';
 
 export const TRACKED_10_ASSETS = [
@@ -21,9 +21,9 @@ export const TRACKED_10_ASSETS = [
  */
 export async function runDiagnostics(): Promise<DiagnosticReport> {
   const items: DiagnosticItem[] = [];
-  const token = getEnvToken('alltick');
 
-  // 1. AllTick REST API Latency Test
+  // 1. Market data latency test — goes through our own server proxy so that no
+  //    provider credential is ever present in the browser.
   let alltickLatencyMs = 0;
   let alltickStatus: 'green' | 'yellow' | 'red' = 'red';
   let alltickMsg = '';
@@ -31,13 +31,9 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
 
   const alltickStart = performance.now();
   try {
-    const testUrl = token && token !== 'LIVE_PRO_FEED'
-      ? `https://quote.alltick.co/quote-b-rest/kline?token=${token}&symbol=XAUUSD&period=1m&count=1`
-      : 'https://open.er-api.com/v6/latest/USD';
-
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), 6000);
-    const res = await fetch(testUrl, { signal: ctrl.signal });
+    const res = await fetch('/api/market/rates', { signal: ctrl.signal });
     clearTimeout(timeoutId);
 
     alltickLatencyMs = Math.round(performance.now() - alltickStart);
@@ -59,7 +55,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
       alltickStatus = 'red';
       alltickLatencyMs = Math.round(performance.now() - alltickStart);
       alltickMsg = `فشل طلب AllTick API برمز الحالة: ${res.status}`;
-      alltickRec = 'تأكد من صلاحية رمز VITE_ALLTICK_TOKEN في ملف البيئة.';
+      alltickRec = 'تأكد من صلاحية ALLTICK_TOKEN في متغيرات بيئة السيرفر (Vercel).';
     }
   } catch (err: any) {
     alltickLatencyMs = Math.round(performance.now() - alltickStart);
@@ -126,73 +122,42 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
     recommendation: supabaseRec || undefined,
   });
 
-  // 3. WebSocket Connection Probe
+  // 3. Live feed probe — checks our own server endpoint, not a provider socket.
   let websocketStatus: 'green' | 'red' = 'red';
   let websocketState = 'DISCONNECTED';
   let wsMsg = '';
   let wsRec = '';
 
   try {
-    if (token && token !== 'LIVE_PRO_FEED') {
-      const probePromise = new Promise<{ open: boolean; state: string }>((resolve) => {
-        let finished = false;
-        const testWs = new WebSocket(`wss://quote.alltick.co/quote-b-ws-api?token=${token}`);
-        const timer = setTimeout(() => {
-          if (!finished) {
-            finished = true;
-            try { testWs.close(); } catch {}
-            resolve({ open: false, state: 'TIMEOUT' });
-          }
-        }, 3500);
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch('/api/market/health', { signal: ctrl.signal });
+    clearTimeout(timeoutId);
 
-        testWs.onopen = () => {
-          if (!finished) {
-            finished = true;
-            clearTimeout(timer);
-            try { testWs.close(); } catch {}
-            resolve({ open: true, state: 'OPEN' });
-          }
-        };
-
-        testWs.onerror = () => {
-          if (!finished) {
-            finished = true;
-            clearTimeout(timer);
-            resolve({ open: false, state: 'ERROR' });
-          }
-        };
-
-        testWs.onclose = () => {
-          if (!finished) {
-            finished = true;
-            clearTimeout(timer);
-            resolve({ open: false, state: 'CLOSED' });
-          }
-        };
-      });
-
-      const wsResult = await probePromise;
-      if (wsResult.open) {
+    if (res.ok) {
+      const health: any = await res.json();
+      const configured = Boolean(health?.alltick || health?.twelvedata || health?.finnhub);
+      if (configured) {
         websocketStatus = 'green';
         websocketState = 'CONNECTED';
-        wsMsg = 'قناة البث اللحظي WebSocket مفتوحة وتستقبل تدفق الأسعار بنجاح.';
+        wsMsg = 'قناة البيانات الحية متصلة عبر خادم التطبيق وتستقبل تحديثات الأسعار بنجاح.';
       } else {
         websocketStatus = 'red';
-        websocketState = wsResult.state;
-        wsMsg = `قناة WebSocket غير متصلة (${wsResult.state}).`;
-        wsRec = 'تأكد من فتح المنفذ WSS 443 وصلاحية التوكن لاستقبال التدفق الحي.';
+        websocketState = 'NO_PROVIDER';
+        wsMsg = 'لا يوجد مزود بيانات مُهيّأ على السيرفر.';
+        wsRec = 'أضِف ALLTICK_TOKEN أو TWELVE_DATA_API_KEY في متغيرات بيئة Vercel.';
       }
     } else {
       websocketStatus = 'red';
-      websocketState = 'NO_TOKEN';
-      wsMsg = 'رمز VITE_ALLTICK_TOKEN غير مهيأ للبث الحي للـ WebSocket.';
-      wsRec = 'أضف رمز AllTick في ملف .env لتفعيل البث المباشر للشمعات اللحظية.';
+      websocketState = `HTTP_${res.status}`;
+      wsMsg = `تعذّر الوصول إلى نقطة فحص البيانات (رمز ${res.status}).`;
+      wsRec = 'تأكد من نشر دوال /api/market على Vercel.';
     }
   } catch (err: any) {
     websocketStatus = 'red';
     websocketState = 'EXCEPTION';
-    wsMsg = `تعذر فحص WebSocket: ${err?.message || 'خطأ غير متوقع'}`;
-    wsRec = 'تحقق من دعم المتصفح لبروتوكول WebSocket ومن عدم حجب اتصالات WSS.';
+    wsMsg = `تعذّر فحص قناة البيانات: ${err?.message || 'خطأ غير متوقع'}`;
+    wsRec = 'تحقق من الاتصال بالشبكة ومن نشر دوال الـ API.';
   }
 
   items.push({

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useResponsiveTable } from '../hooks/useResponsiveTable';
 import { Signal, SignalDirection, Timeframe } from '../types/signals';
 import { getAllSignals } from '../services/signalRepository';
 import { fetchLiveMarketRates } from '../services/liveMarketData';
@@ -75,6 +76,8 @@ interface DirectionStat {
 }
 
 export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ onOpenDetails }) => {
+  const t1Ref = useResponsiveTable<HTMLTableElement>();
+  const t2Ref = useResponsiveTable<HTMLTableElement>();
   const [signals, setSignals] = useState<Signal[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [lastFetched, setLastFetched] = useState<string>('');
@@ -853,7 +856,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ onOpenDetails }) =
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-xs text-right font-sans">
+              <table ref={t1Ref} className="rtable w-full text-xs text-right font-sans">
                 <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800">
                   <tr>
                     <th className="py-3 px-4 font-bold">الرمز (Symbol)</th>
@@ -907,7 +910,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ onOpenDetails }) =
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-xs text-right font-sans">
+              <table ref={t2Ref} className="rtable w-full text-xs text-right font-sans">
                 <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800">
                   <tr>
                     <th className="py-3 px-4 font-bold">الإطار الزمني (Timeframe)</th>

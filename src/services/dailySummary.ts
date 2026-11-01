@@ -1,14 +1,17 @@
 import { supabase } from './supabaseClient';
 import { DailySummary } from '../types/signals';
+import { cairoDateYmd, cairoDayStartUtcIso, cairoDayEndUtcIso, getCairoParts } from './marketClock';
 
 /**
- * Formats a Date object to YYYY-MM-DD
+ * Formats a Date object to YYYY-MM-DD **in the market timezone**.
+ *
+ * BUGFIX: the previous implementation used getFullYear/getMonth/getDate, i.e.
+ * the DEVICE calendar. A user in UTC-5 at 20:00 local time got yesterday's
+ * date while the server-side filter used today's — summaries landed in the
+ * wrong bucket and the 7-day chart drifted.
  */
 export function formatDateYmd(d: Date = new Date()): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return cairoDateYmd(d.getTime());
 }
 
 /**
@@ -16,15 +19,19 @@ export function formatDateYmd(d: Date = new Date()): string {
  */
 export async function updateDailySummary(dateStr: string = formatDateYmd()): Promise<DailySummary | null> {
   try {
-    const startIso = `${dateStr}T00:00:00.000Z`;
-    const endIso = `${dateStr}T23:59:59.999Z`;
+    // BUGFIX: a Cairo calendar day is NOT 00:00Z..23:59Z. Using UTC bounds
+    // clipped the first 2–3 hours of every trading day and swept in the tail
+    // of the previous one. Compute the real bounds from the Cairo offset.
+    const dayMs = new Date(`${dateStr}T12:00:00.000Z`).getTime();
+    const startIso = cairoDayStartUtcIso(dayMs);
+    const endIso = cairoDayEndUtcIso(dayMs);
 
     // 1. Fetch all signals for that day
     const { data: signals, error: fetchErr } = await supabase
       .from('signals')
       .select('*')
       .gte('created_at', startIso)
-      .lte('created_at', endIso);
+      .lt('created_at', endIso);
 
     if (fetchErr) {
       console.warn('Failed to fetch signals for daily summary:', fetchErr.message);
@@ -105,6 +112,13 @@ export async function updateDailySummary(dateStr: string = formatDateYmd()): Pro
 }
 
 /**
+ * Retained for backwards compatibility with callers that only need the
+ * current Cairo clock parts.
+ */
+export function currentCairoParts() {
+  return getCairoParts();
+}
+/**
  * Fetches the daily summary for a specific date
  */
 export async function getDailySummary(dateStr: string = formatDateYmd()): Promise<DailySummary | null> {
@@ -172,15 +186,21 @@ export async function get7DaySummaries(): Promise<DailySummary[]> {
     console.warn('get7DaySummaries fetch error:', err);
   }
 
-  // Fallback to generating 7 days based on current date if no history is present yet
+  // Fallback: the last 7 TRADING days (weekends excluded) instead of blind
+  // calendar days — otherwise Sat/Sun always render as zero-signal dips and
+  // make the performance chart look like a losing streak.
   const fallback: DailySummary[] = [];
   const today = new Date();
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    const dateStr = formatDateYmd(d);
+  const tradingDays: string[] = [];
+  for (let i = 0; tradingDays.length < 7 && i < 30; i++) {
+    const d = new Date(today.getTime() - i * 24 * 3600_000);
+    const dow = d.getUTCDay();
+    if (dow === 0 || dow === 6) continue; // skip Sun/Mon-open edge + Sat
+    tradingDays.push(formatDateYmd(d));
+  }
+  for (let i = tradingDays.length - 1; i >= 0; i--) {
     fallback.push({
-      date: dateStr,
+      date: tradingDays[i],
       total_signals: 0,
       active_signals: 0,
       won_signals: 0,

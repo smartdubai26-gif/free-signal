@@ -1,4 +1,5 @@
 import { Candle, Signal, SignalDirection, AssetClass } from '../types/signals';
+import { getMarketClock, isForexWeekend } from './marketClock';
 
 /**
  * Calculates Exponential Moving Average (EMA) from real closes
@@ -227,7 +228,14 @@ export function evaluateSignalOutcome(signal: Signal, latestPrice: number, sessi
 
   let activatedAt = signal.activated_at;
   if (!activatedAt && (status === 'OPEN' || status === 'active' || status === 'TP1_HIT' || status === 'TP2_HIT' || status === 'SL_HIT')) {
-    activatedAt = new Date().toISOString();
+    // BUGFIX (the reported bug): this stamped `new Date().toISOString()` — the
+    // wall clock at render time — so a signal evaluated on a Saturday got a
+    // Saturday activation time even though the market was shut. Activation is
+    // now anchored to the last real session open, and never to a closed day.
+    const clock = getMarketClock();
+    activatedAt = clock.isOpen
+      ? new Date().toISOString()
+      : new Date(clock.lastOpenMs).toISOString();
   }
 
   return {

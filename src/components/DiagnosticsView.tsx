@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useResponsiveTable } from '../hooks/useResponsiveTable';
 import { runDiagnostics } from '../services/diagnostics';
 import { DiagnosticReport } from '../types/signals';
 import {
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 
 export const DiagnosticsView: React.FC = () => {
+  const t1Ref = useResponsiveTable<HTMLTableElement>();
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [running, setRunning] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
@@ -326,7 +328,7 @@ export const DiagnosticsView: React.FC = () => {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-xs text-right font-sans">
+              <table ref={t1Ref} className="rtable w-full text-xs text-right font-sans">
                 <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800 font-bold">
                   <tr>
                     <th className="py-3 px-4">الأصل المالي</th>
