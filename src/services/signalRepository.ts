@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { Signal, SignalDirection, Timeframe, SignalStatus } from '../types/signals';
 import { getMarketClock, cairoDayStartUtcIso, cairoDayEndUtcIso } from './marketClock';
 
@@ -110,7 +110,11 @@ export function validateSignalForProduction(sig: Signal): void {
   // Sanity: Check if timestamp is in the future.
   // BUGFIX: this was the ONLY date guard in the whole codebase, and it only
   // caught future timestamps. It never rejected a Saturday. Now a signal is
-  // also rejected when its activation lands inside the closed FX week.
+  // also rejected when its activation lands inside a market closure.
+  //
+  // v9: `clock.isOpen` / `clock.lastOpenMs` come from the holiday-aware pair, so
+  // a signal stamped inside Christmas Day or Good Friday is rejected here for
+  // the same reason a Saturday one is — no extra branch needed.
   const now = new Date();
   const sigDate = sig.timestamp ? new Date(sig.timestamp) : now;
   if (sigDate.getTime() > now.getTime() + 60000) {
@@ -356,12 +360,95 @@ export async function getClosedSignals(): Promise<Signal[]> {
   }
 }
 
-export async function deleteAllSignalsFromSupabase() {
-  try {
-    const { error } = await supabase.from('signals').delete().neq('id', '0');
-    return !error;
-  } catch (err) {
-    console.error('Error deleting all signals:', err);
-    return false;
+/**
+ * Deletes every row from `signals` and reports what actually happened.
+ *
+ * BUGFIX (v11): the old implementation was
+ *
+ *     supabase.from('signals').delete().neq('id', '0')
+ *
+ * `id` is a UUID column, so PostgREST forwards `id=neq.0` and Postgres answers
+ * `invalid input syntax for type uuid: "0"`. The delete therefore failed on
+ * EVERY call — and because the caller only looked at `!error`, the failure was
+ * swallowed and the UI reported success. That is why the reset button "worked"
+ * while the rows stayed in the database and came back on the next sync.
+ *
+ * Two further problems are fixed here:
+ *   - RLS grants anon SELECT only (see supabase/rls_policies.sql), so a browser
+ *     delete is denied by policy. We now distinguish "denied" from "failed" and
+ *     say so, instead of pretending.
+ *   - A delete that matches zero rows is not an error, so we count before and
+ *     after and only report success when the table is genuinely empty.
+ */
+export interface DeleteAllResult {
+  ok: boolean;
+  /** False when Supabase env vars are absent — there is nothing to delete. */
+  configured: boolean;
+  /** Rows present before the attempt (null when the count could not be read). */
+  before: number | null;
+  /** Rows present after the attempt (null when the count could not be read). */
+  after: number | null;
+  error?: string;
+}
+
+export async function deleteAllSignalsFromSupabaseDetailed(): Promise<DeleteAllResult> {
+  if (!isSupabaseConfigured()) {
+    return { ok: false, configured: false, before: null, after: null };
   }
+
+  const countRows = async (): Promise<number | null> => {
+    try {
+      const { count, error } = await supabase
+        .from('signals')
+        .select('id', { count: 'exact', head: true });
+      if (error) return null;
+      return typeof count === 'number' ? count : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const before = await countRows();
+
+  try {
+    // `not('id','is',null)` is true for every row and, unlike `neq('id','0')`,
+    // never sends a non-UUID literal to a UUID column.
+    const { error } = await supabase.from('signals').delete().not('id', 'is', null);
+
+    if (error) {
+      const msg = error.message || 'unknown error';
+      const denied = /permission|policy|denied|row-level/i.test(msg);
+      console.error('[signalRepository] delete all failed:', msg);
+      return {
+        ok: false,
+        configured: true,
+        before,
+        after: await countRows(),
+        error: denied
+          ? `قاعدة البيانات رفضت الحذف (RLS): ${msg}`
+          : msg,
+      };
+    }
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    console.error('[signalRepository] delete all threw:', msg);
+    return { ok: false, configured: true, before, after: await countRows(), error: msg };
+  }
+
+  const after = await countRows();
+  // Success means the table is empty — not merely that no error came back.
+  const ok = after === 0;
+  return {
+    ok,
+    configured: true,
+    before,
+    after,
+    error: ok ? undefined : `لم تُحذف كل الصفوف (متبقٍ ${after ?? '؟'})`,
+  };
+}
+
+/** Back-compat wrapper: boolean only. Prefer the detailed variant. */
+export async function deleteAllSignalsFromSupabase(): Promise<boolean> {
+  const result = await deleteAllSignalsFromSupabaseDetailed();
+  return result.ok;
 }

@@ -17,6 +17,7 @@ import {
 import { evaluateSignalOutcome, calculateATR, calculatePips, runAutomatedMarketAnalysis, scanAndDiscoverNewOpportunities, clearDemoData } from './services/technicalEngine';
 import { fetchLiveMarketRates, fetchRealXauUsdCandle, LiveMarketRates, ApiConfig, getProviderHealth, ProviderHealth } from './services/liveMarketData';
 import { saveSignal, getTodaySignals } from './services/signalRepository';
+import { purgeAllSignals, writeClearedMarkers, getPurgeEpoch, isClearedMarker, isResetLocked, clearResetLock } from './services/dataReset';
 import { runSettlement, closeExpiredSignals } from './services/settlementEngine';
 import { updateDailySummary } from './services/dailySummary';
 import { startScheduler } from './services/scheduler';
@@ -28,6 +29,8 @@ import {
   applyScanWeight,
   formatMarketDateTime,
   formatMarketDateTimeShort,
+  marketNowMs,
+  isDebugClockActive,
   MARKET_TZ_LABEL_AR,
   type MarketClock,
   type AnalysisSchedule,
@@ -225,7 +228,40 @@ export default function App() {
    * UTC London/New York overlap, 1 for the routine closes. Manual runs from the
    * UI pass nothing and therefore use 1.
    */
-  const handleRunAnalysisEngine = useCallback(async (scanWeight: number = 1) => {
+  const handleRunAnalysisEngine = useCallback(async (scanWeight: number = 1, source: 'manual' | 'auto' = 'manual') => {
+    // v11: an explicit scan is the user asking for signals again, so it lifts
+    // the reset lock. An AUTOMATIC scan (scheduler) must never lift it — that
+    // was the last resurrection path: the H4 tick called this function, which
+    // cleared the lock and regenerated the list the user had just deleted.
+    if (source === 'auto' && isResetLocked()) {
+      console.log('[DataReset] reset lock held - skipping automatic analysis');
+      return;
+    }
+    if (source === 'manual') clearResetLock();
+
+    // BUGFIX (v9): this generated opportunities whenever it was called — the
+    // scheduler gated it, but every manual button (header, empty state, card)
+    // called it directly, so a user could create "today's opportunities" at
+    // 08:00 on Christmas Day. The gate lives here, in the one function every
+    // entry point goes through, not in each button.
+    const gateClock = getMarketClock();
+    if (!gateClock.isOpen) {
+      setToastMessage({
+        title: 'السوق مغلق — لا يمكن توليد فرص جديدة',
+        desc:
+          gateClock.closedKind === 'holiday'
+            ? `عطلة رسمية: ${gateClock.holiday?.nameAr ?? ''}. يُستأنف التداول ${formatMarketDateTime(
+                new Date(gateClock.nextOpenMs).toISOString()
+              )}. لم يتم توليد أي إشارة.`
+            : `اليوم سبت (عطلة أسبوعية). يُستأنف التداول ${formatMarketDateTime(
+                new Date(gateClock.nextOpenMs).toISOString()
+              )}. لم يتم توليد أي إشارة.`,
+      });
+      setTimeout(() => setToastMessage(null), 6000);
+      setIsRunningEngine(false);
+      return;
+    }
+
     setIsRunningEngine(true);
     setToastMessage({
       title: 'محرك التحليل يفحص الأسواق ويحفظ التوصيات في قاعدة البيانات...',
@@ -433,14 +469,44 @@ export default function App() {
     });
   }, []);
 
-  // Load persisted signals from Supabase on mount
+  // Load persisted signals from Supabase on mount.
+  //
+  // BUGFIX (reset button): this ran unconditionally, so a page load straight
+  // after a purge pulled every deleted row back out of the database. Two
+  // guards now apply: an explicit cleared marker short-circuits the fetch, and
+  // a purge that lands while the request is in flight discards its result
+  // instead of writing stale rows into state.
   useEffect(() => {
-    getTodaySignals().then((dbSignals) => {
-      if (dbSignals && dbSignals.length > 0) {
-        setTodaySignals(dbSignals);
-        console.log("Loaded persisted signals from Supabase:", dbSignals.length);
-      }
-    });
+    if (isClearedMarker(localStorage.getItem('alphafx_today_signals'))) {
+      console.log('[DataReset] cleared marker present - skipping Supabase sync');
+      return;
+    }
+    if (isResetLocked()) {
+      console.log('[DataReset] reset lock held - skipping Supabase sync');
+      return;
+    }
+
+    const startedAt = Date.now();
+    getTodaySignals()
+      .then((dbSignals) => {
+        if (getPurgeEpoch() > startedAt) {
+          console.log('[DataReset] purge happened during fetch - discarding result');
+          return;
+        }
+        // v11: re-check the lock AFTER the await. A reset that lands while the
+        // request is in flight must win over the rows it was already fetching.
+        if (isResetLocked() || isClearedMarker(localStorage.getItem('alphafx_today_signals'))) {
+          console.log('[DataReset] reset landed during fetch - discarding result');
+          return;
+        }
+        if (dbSignals && dbSignals.length > 0) {
+          setTodaySignals(dbSignals);
+          console.log('Loaded persisted signals from Supabase:', dbSignals.length);
+        }
+      })
+      .catch(() => {
+        /* repository already logs; a failed fetch must not break mount */
+      });
   }, []);
 
   // Initialize automated trading lifecycle scheduler (H4 candle closes, hourly settlement, Cairo 23:00 EOD)
@@ -450,19 +516,29 @@ export default function App() {
         console.log(
           `[Scheduler] Executing H4 close analysis for ${new Date(closeMs).toISOString()} (weight ${weight})`
         );
-        await handleRunAnalysisEngine(weight);
+        // v11: 'auto' — the scheduler may not lift the reset lock.
+        await handleRunAnalysisEngine(weight, 'auto');
       },
       onScheduleChange: (schedule) => setAnalysisSchedule(schedule),
       onSettlementComplete: async (report) => {
         console.log('[Scheduler] Scheduled settlement complete:', report);
+        // BUGFIX (reset button): these callbacks re-hydrated state from the
+        // database with no idea a purge had just run, so a settlement tick a
+        // second after the wipe could resurrect the deleted rows.
+        if (isResetLocked()) return;
+        if (isClearedMarker(localStorage.getItem('alphafx_today_signals'))) return;
         const updated = await getTodaySignals();
+        if (isResetLocked()) return;
         if (updated && updated.length > 0) {
           setTodaySignals(updated);
         }
       },
       onEodComplete: async (count) => {
         console.log(`[Scheduler] Scheduled EOD closed ${count} expired signals`);
+        if (isResetLocked()) return;
+        if (isClearedMarker(localStorage.getItem('alphafx_today_signals'))) return;
         const updated = await getTodaySignals();
+        if (isResetLocked()) return;
         if (updated && updated.length > 0) {
           setTodaySignals(updated);
         }
@@ -470,9 +546,14 @@ export default function App() {
       // BUGFIX: when the week opens or closes, the list must change immediately.
       // On close we re-seed as EXPIRED; on open we clear the stale set so the
       // engine can produce genuine opportunities for the new session.
+      //
+      // ...unless the user has deliberately emptied the app: re-seeding then
+      // would undo their reset behind their back.
       onMarketStateChange: (isOpen) => {
         const clock = getMarketClock();
         setMarketClock(clock);
+        if (isResetLocked()) return;
+        if (isClearedMarker(localStorage.getItem('alphafx_today_signals'))) return;
         if (!isOpen) {
           setTodaySignals(buildSeedSignals(clock.nowMs));
         } else {
@@ -499,7 +580,10 @@ export default function App() {
   // close while open and the week-open instant while closed.
   useEffect(() => {
     const updateClocks = () => {
-      const now = new Date();
+      // v7: the clock comes from marketNowMs() so the preview can be pinned to
+      // a specific date (?debugNow=ISO) to demonstrate Friday / Saturday /
+      // Sunday. In a production build it is exactly Date.now().
+      const now = new Date(marketNowMs());
       const clock = getMarketClock(now.getTime());
       setMarketClock(clock);
 
@@ -530,9 +614,25 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Save to localStorage
+  // Persist to localStorage.
+  //
+  // BUGFIX (reset button): this effect used to write `[]` unconditionally. An
+  // empty array is indistinguishable from "nothing saved yet", so on the next
+  // load the state initialiser fell through to buildSeedSignals() and the
+  // opportunities the user had just deleted came back. We now write the
+  // explicit cleared marker instead, and never overwrite it with a bare `[]`.
   useEffect(() => {
     try {
+      const bothEmpty = todaySignals.length === 0 && historicalSignals.length === 0;
+      const alreadyCleared = isClearedMarker(localStorage.getItem('alphafx_today_signals'));
+
+      if (bothEmpty && alreadyCleared) return; // keep the marker intact
+
+      if (bothEmpty) {
+        writeClearedMarkers();
+        return;
+      }
+
       localStorage.setItem('alphafx_today_signals', JSON.stringify(todaySignals));
       localStorage.setItem('alphafx_historical_signals', JSON.stringify(historicalSignals));
     } catch (e) {
@@ -576,9 +676,12 @@ export default function App() {
     try {
       const report = await runSettlement(liveRates);
       await updateDailySummary();
-      const updated = await getTodaySignals();
-      if (updated && updated.length > 0) {
-        setTodaySignals(updated);
+      // v11: settlement must not re-hydrate a list the user deliberately emptied.
+      if (!isResetLocked()) {
+        const updated = await getTodaySignals();
+        if (updated && updated.length > 0) {
+          setTodaySignals(updated);
+        }
       }
 
       setToastMessage({
@@ -597,39 +700,93 @@ export default function App() {
     }
   }, [liveRates]);
 
-  // Reset data to defaults
-  const handleResetData = () => {
-    localStorage.removeItem('alphafx_today_signals');
-    localStorage.removeItem('alphafx_historical_signals');
-    localStorage.removeItem('alphafx_provider_pref');
-    // Purge any credential left behind by an older build of this app.
-    localStorage.removeItem('alphafx_api_config');
-    setTodaySignals(buildSeedSignals());
-    setHistoricalSignals(HISTORICAL_SIGNALS);
-    setApiConfig({ provider: 'demo', apiKey: '', isCustomConnected: false });
-    setToastMessage({
-      title: 'تمت استعادة البيانات الافتراضية',
-      desc: 'تمت إعادة ضبط السجلات وقائمة التوصيات الأولية',
-    });
-    setTimeout(() => setToastMessage(null), 3000);
-  };
+  // ── Reset: DELETE ONLY ────────────────────────────────────────────────
+  //
+  // v11 contract, stated once and enforced everywhere below:
+  //
+  //   The reset button deletes. It does not scan, does not generate, does not
+  //   reseed, and does not call the analysis engine. If the user wants new
+  //   opportunities they press "تشغيل التحليل" — a different button, on purpose.
+  //
+  // The previous build broke that contract in two places:
+  //   - `handleResetAndRescan` purged, then immediately called
+  //     `handleRunAnalysisEngine()`, which re-read Supabase and repainted the
+  //     list the user had just deleted.
+  //   - `handleResetData` purged, then called `buildSeedSignals()` — so the
+  //     "factory reset" put demo opportunities straight back.
+  //
+  // Both now end with an empty list and a held reset lock.
+
+  /** Shared tail for every reset path: empty state + honest toast. */
+  const finishReset = useCallback(
+    (report: Awaited<ReturnType<typeof purgeAllSignals>>, includePreferences: boolean) => {
+      setTodaySignals([]);
+      setHistoricalSignals([]);
+      if (includePreferences) {
+        setApiConfig({ provider: 'demo', apiKey: '', isCustomConnected: false });
+      }
+
+      // Three honest outcomes, never a blanket "success".
+      if (!report.remoteConfigured) {
+        setToastMessage({
+          title: '✅ تم مسح الفرص من هذا المتصفح',
+          desc: 'قاعدة البيانات غير متصلة، فلم يُمسح منها شيء. الفرص لن تعود في هذا المتصفح.',
+        });
+      } else if (report.remoteCleared) {
+        setToastMessage({
+          title: '✅ تم مسح كل الفرص',
+          desc: 'حُذفت من المتصفح ومن قاعدة البيانات. لن تُعاد أي فرصة تلقائيًا حتى تطلب فحصًا جديدًا.',
+        });
+      } else {
+        setToastMessage({
+          title: '⚠️ تم المسح محليًا فقط — قاعدة البيانات لم تُمسح',
+          desc: `${report.remoteError || 'فشل الحذف من قاعدة البيانات.'} الفرص القديمة قد تعود عند إعادة التحميل.`,
+        });
+      }
+      setTimeout(() => setToastMessage(null), 8000);
+    },
+    []
+  );
 
   /**
-   * Header "تصفير وإعادة فحص" action.
-   *
-   * Identical behaviour to the old inline handler, extracted so the header can
-   * stay presentational. Kept out of the reset-data path above because it also
-   * re-runs the analysis engine.
+   * "إعادة ضبط المصنع" — deletes everything, including preferences.
+   * It does NOT reseed demo signals: an empty app is the honest result of a
+   * reset, and the empty state offers an explicit "تحميل فرص اليوم" button for
+   * anyone who wants the demo set back.
    */
-  const handleResetAndRescan = useCallback(() => {
-    localStorage.removeItem('alphafx_today_signals');
-    setTodaySignals([]);
+  const handleResetData = useCallback(async () => {
+    const report = await purgeAllSignals({ includePreferences: true, remote: true });
+    finishReset(report, true);
+    return report;
+  }, [finishReset]);
+
+  /**
+   * Header "تصفير" action.
+   *
+   * Deletes from both stores and stops there. No rescan, no regeneration, no
+   * scheduler kick. The reset lock keeps every automatic path from refilling
+   * the list afterwards.
+   */
+  const handleResetAndRescan = useCallback(async () => {
+    setIsRunningEngine(true);
     setToastMessage({
-      title: 'تم مسح البيانات',
-      desc: 'تم مسح كافة الصفقات القديمة. ابدأ الآن بفحص السوق.',
+      title: 'جارٍ مسح الفرص...',
+      desc: 'يتم حذف كل الفرص من المتصفح وقاعدة البيانات. لن يبدأ أي فحص تلقائي بعد المسح.',
     });
-    handleRunAnalysisEngine();
-  }, [handleRunAnalysisEngine]);
+
+    try {
+      const report = await purgeAllSignals({ includePreferences: false, remote: true });
+      finishReset(report, false);
+    } catch (err: any) {
+      setToastMessage({
+        title: '⚠️ تعذّر إكمال المسح',
+        desc: err?.message || 'حدث خطأ غير متوقع أثناء المسح.',
+      });
+      setTimeout(() => setToastMessage(null), 8000);
+    } finally {
+      setIsRunningEngine(false);
+    }
+  }, [finishReset]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
@@ -862,6 +1019,19 @@ export default function App() {
         {/* Tab 1: Today's Recommendations */}
         {activeTab === 'today' && (
           <div className="space-y-6">
+            {/* Preview clock badge — only rendered when ?debugNow= is active.
+                It exists so a screenshot of a pinned date can never be mistaken
+                for the real current date. */}
+            {isDebugClockActive() && (
+              <div className="rounded-xl border border-sky-600/50 bg-sky-950/40 px-3 py-2 text-[11px] font-mono text-sky-200 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="px-2 py-0.5 rounded-full bg-sky-500/20 border border-sky-500/40 font-bold">
+                  PREVIEW CLOCK
+                </span>
+                <span>
+                  الساعة مثبّتة على {formatMarketDateTime(new Date(marketClock.nowMs).toISOString())} لأغراض العرض فقط
+                </span>
+              </div>
+            )}
             {/* ── Market-closed banner ──────────────────────────────────
                 BUGFIX (the reported bug): the app had no concept of a closed
                 market, so on a Saturday it presented Friday's setups as
@@ -876,11 +1046,17 @@ export default function App() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
+                      {/* v9: the heading names the reason — a holiday says
+                          «عطلة رسمية: الكريسماس»، a Saturday says so. The
+                          generic «السوق مغلق» alone made a user think the
+                          app was broken rather than that the exchange was. */}
                       <h3 className="text-sm font-bold text-amber-300">
-                        السوق مغلق الآن — لا توجد فرص جديدة اليوم
+                        {marketClock.closedKind === 'holiday'
+                          ? `السوق مغلق — عطلة رسمية: ${marketClock.holiday?.nameAr ?? ''}`
+                          : 'السوق مغلق — عطلة نهاية الأسبوع'}
                       </h3>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/40 font-mono">
-                        MARKET CLOSED
+                        {marketClock.closedKind === 'holiday' ? 'PUBLIC HOLIDAY' : 'WEEKEND'}
                       </span>
                     </div>
                     <p className="text-xs text-amber-100/80 mt-1 leading-relaxed">
@@ -942,7 +1118,9 @@ export default function App() {
                     </span>
                     {analysisSchedule.deferredFromWeekend && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full border bg-amber-500/15 border-amber-500/40 text-amber-300 font-medium">
-                        مؤجَّل من العطلة
+                        {marketClock.closedKind === 'holiday'
+                          ? `مؤجَّل — عطلة: ${marketClock.holiday?.nameAr ?? ''}`
+                          : 'مؤجَّل من عطلة السبت'}
                       </span>
                     )}
                   </div>
@@ -1320,6 +1498,11 @@ export default function App() {
                       // snapshot, which was frozen at page-load time and always
                       // claimed a 07:30 activation. Rebuild from the live clock
                       // so the reloaded set is honest about the current session.
+                      //
+                      // v11: this is an explicit user request for signals, so it
+                      // lifts the reset lock — otherwise the persist effect would
+                      // keep the cleared marker and the seeds would vanish on reload.
+                      clearResetLock();
                       const seeds = buildSeedSignals();
                       setTodaySignals(seeds);
                       try {

@@ -200,34 +200,47 @@ test('Phase 17 — Requirement 3: Stale feed detection across engines', () => {
   assert.strictEqual(vpRes.provenance.freshnessStatus, 'STALE');
 });
 
-test('Phase 17 — Requirement 5: Provider timestamp semantics & Forex market weekend closure', () => {
-  // Friday 20:00 UTC (Market open)
+test('Phase 17 — Requirement 5: Provider timestamp semantics & market holiday closure (Saturday only)', () => {
+  // BUGFIX (v9): 22:00Z on 9 May 2025 is 01:00 on SATURDAY in Cairo, so
+  // "Friday 22:00 must be open" was false under a Cairo-calendar rule and this
+  // test had been red (when it could run at all). Anchors below are on the
+  // Cairo calendar.
+
+  // Cairo Friday 23:00 (20:00Z) — trading.
   const fridayOpen = new Date('2025-05-09T20:00:00Z').getTime();
   assert.strictEqual(isForexMarketClosed(fridayOpen), false);
 
-  // Friday 22:00 UTC (Market closed)
-  const fridayClosed = new Date('2025-05-09T22:00:00Z').getTime();
+  // Cairo Saturday 00:00 (21:00Z Friday) — the closure starts here.
+  const fridayClosed = new Date('2025-05-09T21:00:00Z').getTime();
   assert.strictEqual(isForexMarketClosed(fridayClosed), true);
 
-  // Saturday 12:00 UTC (Market closed)
+  // Cairo Saturday 15:00 (12:00Z) — mid-closure.
   const saturdayClosed = new Date('2025-05-10T12:00:00Z').getTime();
   assert.strictEqual(isForexMarketClosed(saturdayClosed), true);
 
-  // Sunday 15:00 UTC (Market closed)
+  // Cairo Sunday 18:00 (15:00Z) — Sunday is a normal trading day.
   const sundayClosed = new Date('2025-05-11T15:00:00Z').getTime();
-  assert.strictEqual(isForexMarketClosed(sundayClosed), true);
+  assert.strictEqual(isForexMarketClosed(sundayClosed), false);
 
-  // Sunday 22:00 UTC (Market reopened)
-  const sundayReopened = new Date('2025-05-11T22:00:00Z').getTime();
+  // Cairo Sunday 23:00 (20:00Z) — still Sunday, still open.
+  const sundayReopened = new Date('2025-05-11T20:00:00Z').getTime();
   assert.strictEqual(isForexMarketClosed(sundayReopened), false);
 
-  // Aggregator does not flag gaps during weekend closure
+  // v9: a public holiday closes the market exactly like Saturday.
+  const christmas2026 = new Date('2026-12-25T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(christmas2026), true);
+
+  // Good Friday 2027 (26 March) — a movable feast computed from Easter.
+  const goodFriday2027 = new Date('2027-03-26T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(goodFriday2027), true);
+
+  // Aggregator does not flag gaps during the holiday closure
   const aggregator = new TickAggregator();
   const isComplete = aggregator.isIntervalComplete(
     'EUR/USD',
     'M1',
-    fridayClosed,
-    fridayClosed + 3600000 // 1 hour during closed market
+    saturdayClosed,
+    saturdayClosed + 3600000 // 1 hour during closed market
   );
   assert.strictEqual(isComplete, true, 'Market closure period must not be marked incomplete');
 });

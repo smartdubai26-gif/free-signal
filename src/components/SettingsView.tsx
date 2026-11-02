@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ALL_INSTRUMENTS } from '../services/mockData';
 import { ApiConfig, testTwelveDataApiKey, testFinnhubApiKey, testAllTickApiKey } from '../services/liveMarketData';
-import { deleteAllSignalsFromSupabase } from '../services/signalRepository';
+import { purgeAllSignals } from '../services/dataReset';
 import {
   Bell,
   Volume2,
@@ -24,7 +24,11 @@ import {
 
 interface SettingsViewProps {
   onTriggerNotificationTest: (title: string, message: string) => void;
-  onResetData: () => void;
+  /**
+   * v11: returns the purge report so this view can show the REAL outcome
+   * instead of running its own second purge and guessing.
+   */
+  onResetData: () => Promise<{ localKeysRemoved: number; remoteCleared: boolean; remoteConfigured: boolean; remoteError?: string } | void> | void;
   onOpenDisclaimer: () => void;
   apiConfig?: ApiConfig;
   onSaveApiConfig?: (config: ApiConfig) => void;
@@ -60,6 +64,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [emailDigest, setEmailDigest] = useState(false);
   const [telegramChatId, setTelegramChatId] = useState('@AlphaFX_Trading_Signals');
   const [emailAddress, setEmailAddress] = useState('user@trader.com');
+
+  // Hard-reset confirmation state.
+  //
+  // BUGFIX: the danger action used a native `confirm()` and then reloaded the
+  // page with `window.location.reload()`. Neither is acceptable here: reload()
+  // destroyed the React tree before the purge could be observed, so a failed
+  // remote delete looked exactly like a successful one, and the UI never had a
+  // chance to update in place. A real dialog now owns the flow and reports the
+  // outcome of each store separately.
+  const [showHardResetDialog, setShowHardResetDialog] = useState(false);
+  const [isPurging, setIsPurging] = useState(false);
+  const [purgeOutcome, setPurgeOutcome] = useState<
+    { local: number; remote: boolean; configured: boolean; error?: string } | null
+  >(null);
 
   const togglePair = (symbol: string) => {
     setActivePairs((prev) => ({
@@ -550,23 +568,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </button>
           
           <button
-            onClick={async () => {
-              if (confirm('هل أنت متأكد؟ سيتم مسح كافة الصفقات والبيانات من كل الأقسام (بما في ذلك قاعدة البيانات على الويب). لن يتم مسح مفاتيح الـ API.')) {
-                // 1. Clear local storage
-                Object.keys(localStorage).forEach(key => {
-                  if (!key.includes('api_config')) {
-                    localStorage.removeItem(key);
-                  }
-                });
-                localStorage.setItem('alphafx_today_signals', '{"cleared":true}');
-                localStorage.setItem('alphafx_historical_signals', '{"cleared":true}');
-                
-                // 2. Clear remote database
-                await deleteAllSignalsFromSupabase();
-                
-                window.location.reload();
-              }
-            }}
+            onClick={() => setShowHardResetDialog(true)}
             className="px-3.5 py-2 bg-rose-900/50 hover:bg-rose-800 text-rose-200 rounded-xl text-xs font-bold transition-colors border border-rose-700 flex items-center gap-1.5"
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -581,6 +583,110 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Hard-reset confirmation dialog (replaces window.confirm + reload) */}
+      {showHardResetDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="hard-reset-title"
+        >
+          <div className="w-full sm:max-w-md bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl shadow-2xl p-5 space-y-4 pb-safe">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-rose-400" />
+              </div>
+              <div className="min-w-0">
+                <h3 id="hard-reset-title" className="text-base font-bold text-white">
+                  تصفير كامل للبيانات
+                </h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  سيتم حذف كل التوصيات والسجلات من المتصفح <strong className="text-slate-200">ومن قاعدة البيانات</strong>.
+                  لا يمكن التراجع عن هذه الخطوة. مفاتيح الـ API وإعدادات المزود لن تُمسح.
+                </p>
+              </div>
+            </div>
+
+            {purgeOutcome && (
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] font-mono space-y-1">
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>المتصفح</span>
+                  <span className="text-emerald-400">{purgeOutcome.local} مفتاح محذوف</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>قاعدة البيانات</span>
+                  <span className={purgeOutcome.remote ? 'text-emerald-400' : 'text-amber-400'}>
+                    {purgeOutcome.remote
+                      ? 'تم المسح'
+                      : purgeOutcome.configured
+                      ? 'فشل الحذف'
+                      : 'غير متصلة — لم يُمسح شيء'}
+                  </span>
+                </div>
+                {!purgeOutcome.remote && purgeOutcome.error && (
+                  <div className="pt-1 border-t border-slate-800 text-amber-300/90 leading-relaxed break-words">
+                    {purgeOutcome.error}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={() => {
+                  setShowHardResetDialog(false);
+                  setPurgeOutcome(null);
+                }}
+                disabled={isPurging}
+                className="flex-1 min-h-[44px] px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 rounded-xl text-sm font-semibold transition-colors border border-slate-700"
+              >
+                إلغاء
+              </button>
+              <button
+                onClick={async () => {
+                  setIsPurging(true);
+                  setPurgeOutcome(null);
+                  try {
+                    // v11: ONE purge, owned by App. This view used to call
+                    // purgeAllSignals() itself and then call onResetData(), which
+                    // purged a second time — two deletes, two epochs, and the
+                    // report shown here described the first one only.
+                    const report = await onResetData();
+                    if (report) {
+                      setPurgeOutcome({
+                        local: report.localKeysRemoved,
+                        remote: report.remoteCleared,
+                        configured: report.remoteConfigured,
+                        error: report.remoteError,
+                      });
+                    }
+                  } catch (err) {
+                    console.error('[HardReset] failed', err);
+                    setPurgeOutcome({ local: 0, remote: false, configured: true, error: String(err) });
+                  } finally {
+                    setIsPurging(false);
+                  }
+                }}
+                disabled={isPurging}
+                className="flex-1 min-h-[44px] px-4 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2"
+              >
+                {isPurging ? (
+                  <>
+                    <RotateCcw className="w-4 h-4 animate-spin" />
+                    <span>جارٍ المسح...</span>
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="w-4 h-4" />
+                    <span>تأكيد المسح الكامل</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

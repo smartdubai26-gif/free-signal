@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient';
 import { DailySummary } from '../types/signals';
-import { cairoDateYmd, cairoDayStartUtcIso, cairoDayEndUtcIso, getCairoParts } from './marketClock';
+import { cairoDateYmd, cairoDayStartUtcIso, cairoDayEndUtcIso, getCairoParts, isMarketClosed } from './marketClock';
 
 /**
  * Formats a Date object to YYYY-MM-DD **in the market timezone**.
@@ -186,16 +186,18 @@ export async function get7DaySummaries(): Promise<DailySummary[]> {
     console.warn('get7DaySummaries fetch error:', err);
   }
 
-  // Fallback: the last 7 TRADING days (weekends excluded) instead of blind
-  // calendar days — otherwise Sat/Sun always render as zero-signal dips and
-  // make the performance chart look like a losing streak.
+  // Fallback: the last 7 TRADING days (the Saturday holiday excluded) instead
+  // of blind calendar days — otherwise Saturday always renders as a zero-signal
+  // dip and makes the performance chart look like a losing streak.
+  // BUGFIX (v7): this used to skip BOTH Sunday and Saturday. Sunday is a normal
+  // trading day now, so skipping it silently dropped a real trading day from
+  // the chart and shifted the whole 7-day window.
   const fallback: DailySummary[] = [];
   const today = new Date();
   const tradingDays: string[] = [];
   for (let i = 0; tradingDays.length < 7 && i < 30; i++) {
     const d = new Date(today.getTime() - i * 24 * 3600_000);
-    const dow = d.getUTCDay();
-    if (dow === 0 || dow === 6) continue; // skip Sun/Mon-open edge + Sat
+    if (isMarketClosed(d.getTime())) continue; // Saturday or a public holiday
     tradingDays.push(formatDateYmd(d));
   }
   for (let i = tradingDays.length - 1; i >= 0; i--) {
@@ -213,4 +215,49 @@ export async function get7DaySummaries(): Promise<DailySummary[]> {
     });
   }
   return fallback;
+}
+
+/**
+ * Deterministic sample week used ONLY when Supabase is not configured.
+ *
+ * Without it the performance chart renders seven empty bars, which reads as
+ * "the app is broken" rather than "there is no data yet". The values are
+ * derived from the date so they are stable across reloads, and the UI labels
+ * them as sample data — they are never presented as real results.
+ */
+export function getSampleWeekSummaries(): DailySummary[] {
+  const today = new Date();
+  const days: string[] = [];
+  for (let i = 0; days.length < 7 && i < 30; i++) {
+    const d = new Date(today.getTime() - i * 24 * 3600_000);
+    const dow = d.getUTCDay();
+    if (dow === 0 || dow === 6) continue;
+    days.push(formatDateYmd(d));
+  }
+
+  return days.reverse().map((date, idx) => {
+    // Stable pseudo-random from the date string, so the chart does not jump
+    // between renders.
+    const seed = date.split('-').reduce((a, p) => a + Number(p), 0) + idx * 7;
+    const total = 4 + (seed % 5);
+    const won = 2 + (seed % 3);
+    const lost = Math.max(0, total - won - (seed % 2));
+    const notTriggered = Math.max(0, total - won - lost);
+    const settled = won + lost;
+    const winRate = settled > 0 ? Math.round((won / settled) * 100) : 0;
+    const totalPips = won * (18 + (seed % 12)) - lost * (12 + (seed % 8));
+
+    return {
+      date,
+      total_signals: total,
+      active_signals: 0,
+      won_signals: won,
+      lost_signals: lost,
+      not_triggered_signals: notTriggered,
+      win_rate: winRate,
+      total_pips: totalPips,
+      best_trade_pips: 18 + (seed % 12),
+      worst_trade_pips: -(12 + (seed % 8)),
+    };
+  });
 }

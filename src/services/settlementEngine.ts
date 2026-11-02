@@ -1,6 +1,6 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchLiveMarketRates } from './liveMarketData';
-import { getMarketClock, isForexWeekend } from './marketClock';
+import { getMarketClock } from './marketClock';
 
 export interface SettlementReport {
   processedCount: number;
@@ -172,6 +172,10 @@ export async function runSettlement(cachedRates?: Record<string, { price: number
     // still compared Friday's stale prices against pending entries and stamped
     // `activated_at = nowIso` — i.e. it "activated opportunities" on a day the
     // market was shut. Activation is now gated on the FX week being open.
+    //
+    // v9: `clock.isOpen` is false for a Cairo Saturday AND for any date in the
+    // public-holiday calendar, so Christmas / New Year's Day / Good Friday are
+    // covered here without a second branch.
     const clock = getMarketClock();
     const marketOpen = clock.isOpen;
     if (!marketOpen) {

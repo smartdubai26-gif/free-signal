@@ -1,5 +1,5 @@
 import { Candle, Signal, SignalDirection, AssetClass } from '../types/signals';
-import { getMarketClock, isForexWeekend } from './marketClock';
+import { getMarketClock } from './marketClock';
 
 /**
  * Calculates Exponential Moving Average (EMA) from real closes

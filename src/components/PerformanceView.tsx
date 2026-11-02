@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useResponsiveTable } from '../hooks/useResponsiveTable';
 import { PerformanceStats, DailySummary } from '../types/signals';
-import { getDailySummary, get7DaySummaries, updateDailySummary, formatDateYmd } from '../services/dailySummary';
+import { getDailySummary, get7DaySummaries, getSampleWeekSummaries, updateDailySummary, formatDateYmd } from '../services/dailySummary';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import {
   TrendingUp,
   Award,
@@ -38,16 +39,45 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
   const [todaySummary, setTodaySummary] = useState<DailySummary | null>(null);
   const [sevenDaySummaries, setSevenDaySummaries] = useState<DailySummary[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  // True when the numbers on screen are the offline sample week, not real
+  // settled results. Surfaced in the UI so nobody mistakes them for a record.
+  const [isSampleData, setIsSampleData] = useState<boolean>(false);
 
   const fetchPerformanceData = async () => {
     setIsLoading(true);
+
+    // BUGFIX: when Supabase is not configured the client still points at a
+    // placeholder host, so every query waits for a DNS/connection failure
+    // before falling back. The chart therefore sat empty for the whole
+    // timeout. Short-circuit instead: no connection means sample data, now.
+    if (!isSupabaseConfigured()) {
+      setTodaySummary(null);
+      setSevenDaySummaries(getSampleWeekSummaries());
+      setIsSampleData(true);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const today = await getDailySummary(formatDateYmd());
       const week = await get7DaySummaries();
       setTodaySummary(today);
-      setSevenDaySummaries(week);
+
+      // BUGFIX: with no Supabase connection the week came back as seven
+      // all-zero rows, so the chart rendered seven empty bars and the highest
+      // value — the one the user was looking for — simply was not there.
+      const allZero = week.every((d) => d.total_signals === 0 && d.win_rate === 0);
+      if (allZero) {
+        setSevenDaySummaries(getSampleWeekSummaries());
+        setIsSampleData(true);
+      } else {
+        setSevenDaySummaries(week);
+        setIsSampleData(false);
+      }
     } catch (err) {
       console.warn('Failed to load performance data from Supabase:', err);
+      setSevenDaySummaries(getSampleWeekSummaries());
+      setIsSampleData(true);
     } finally {
       setIsLoading(false);
     }
@@ -201,6 +231,11 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
             <h3 className="text-base font-bold text-white">
               مخطط معدل النجاح والنقاط لآخر 7 أيام
             </h3>
+            {isSampleData && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-bold whitespace-nowrap">
+                بيانات تجريبية
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-4 text-xs">
             <div className="flex items-center gap-1.5">
@@ -214,14 +249,21 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
           </div>
         </div>
 
-        {/* Bar Chart Visualization */}
+        {/* Bar Chart Visualization.
+            BUGFIX (missing top value on desktop): the bar's height was a
+            percentage of the whole column, and the column also held the value
+            label and the date label. At 100% win rate the bar alone consumed
+            the entire column, so the value label was pushed above the grid and
+            clipped — the highest bar was the one whose number you could not
+            read. The bar now lives in its own flex-1 track with the label
+            outside it, so the number always has reserved space. */}
         <div className="space-y-4">
-          <div className="grid grid-cols-7 gap-2 sm:gap-4 items-end h-44 pt-6 pb-2 border-b border-slate-800">
+          <div className="grid grid-cols-7 gap-1.5 sm:gap-4 items-end h-52 pt-2 pb-2 border-b border-slate-800">
             {sevenDaySummaries.map((day, idx) => {
               const heightPercent = Math.max(day.win_rate, 8);
               const isToday = day.date === formatDateYmd();
               return (
-                <div key={idx} className="flex flex-col items-center h-full justify-end group relative">
+                <div key={idx} className="flex flex-col items-center h-full justify-end group relative min-w-0">
                   {/* Tooltip on hover */}
                   <div className="absolute -top-10 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950 border border-slate-700 text-[11px] text-slate-200 px-2 py-1 rounded shadow-lg pointer-events-none whitespace-nowrap z-20">
                     <div>{day.date}</div>
@@ -229,29 +271,36 @@ export const PerformanceView: React.FC<PerformanceViewProps> = ({
                     <div className="text-emerald-400">نقاط: {day.total_pips > 0 ? `+${day.total_pips}` : day.total_pips}</div>
                   </div>
 
-                  {/* Value label */}
-                  <span className="text-[11px] font-mono font-bold text-slate-300 mb-1">
+                  {/* Value label — outside the bar track, so it can never be
+                      pushed out by a tall bar. */}
+                  <span className="text-[10px] sm:text-[11px] font-mono font-bold text-slate-300 mb-1 shrink-0 leading-none">
                     {day.win_rate > 0 ? `${day.win_rate}%` : '—'}
                   </span>
 
-                  {/* Bar */}
-                  <div className="w-full max-w-[42px] bg-slate-800/80 rounded-t-lg relative flex flex-col justify-end overflow-hidden" style={{ height: `${(heightPercent / maxWinRate) * 100}%` }}>
+                  {/* Bar track: takes the remaining height, bar fills a
+                      percentage of the TRACK only. */}
+                  <div className="w-full flex-1 min-h-0 flex items-end justify-center">
                     <div
-                      className={`w-full h-full transition-all duration-300 ${
-                        day.win_rate >= 70
-                          ? 'bg-gradient-to-t from-emerald-600 to-emerald-400'
-                          : day.win_rate >= 50
-                          ? 'bg-gradient-to-t from-amber-600 to-amber-400'
-                          : day.win_rate > 0
-                          ? 'bg-gradient-to-t from-rose-600 to-rose-400'
-                          : 'bg-slate-700/50'
-                      }`}
-                    ></div>
+                      className="w-full max-w-[42px] bg-slate-800/80 rounded-t-lg relative flex flex-col justify-end overflow-hidden"
+                      style={{ height: `${(heightPercent / maxWinRate) * 100}%` }}
+                    >
+                      <div
+                        className={`w-full h-full transition-all duration-300 ${
+                          day.win_rate >= 70
+                            ? 'bg-gradient-to-t from-emerald-600 to-emerald-400'
+                            : day.win_rate >= 50
+                            ? 'bg-gradient-to-t from-amber-600 to-amber-400'
+                            : day.win_rate > 0
+                            ? 'bg-gradient-to-t from-rose-600 to-rose-400'
+                            : 'bg-slate-700/50'
+                        }`}
+                      ></div>
+                    </div>
                   </div>
 
                   {/* Date label */}
-                  <span className={`text-[10px] mt-2 font-mono ${isToday ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>
-                    {day.date.slice(5)} {isToday && '(اليوم)'}
+                  <span className={`text-[9px] sm:text-[10px] mt-2 font-mono shrink-0 leading-none ${isToday ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>
+                    {day.date.slice(5)}
                   </span>
                 </div>
               );

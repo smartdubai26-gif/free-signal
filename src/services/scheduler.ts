@@ -7,6 +7,7 @@ import {
   getAnalysisSchedule,
   getLastH4CloseMs,
   getScanPriority,
+  marketNowMs,
   type AnalysisSchedule,
 } from './marketClock';
 
@@ -46,12 +47,15 @@ export function getCairoDateTime(): { dateStr: string; hour: number; minute: num
  *   weighted higher, so opportunities found there outrank the routine scans.
  *
  * MARKET GATING (kept from the previous fix, still mandatory):
- *   - No analysis while the FX week is closed (Saturday, Friday after 21:00 UTC,
- *     Sunday before 21:00 UTC).
- *   - A scan that would have fallen inside the weekend is deferred to the
- *     week-open instant (Sunday 21:00 UTC), i.e. the first candle after the open.
+ *   - No analysis while the market is closed. "Closed" means a Cairo
+ *     Saturday OR a date in the public-holiday calendar (Christmas, New
+ *     Year's Day, Good Friday, Easter Monday, plus any explicit override).
+ *     Both kinds of closure go through `marketClock.isMarketClosed()`, so the
+ *     scheduler never needs to know which one it hit.
+ *   - A scan that would have fallen inside a closure is deferred to the first
+ *     H4 close after the reopen instant (see `nextAnalysisMs`).
  *   - Settlement still runs hourly while open, and the 23:00 Cairo EOD close
- *     still runs even when closed (a weekend must reconcile Friday's leftovers).
+ *     still runs even when closed (a closure must reconcile leftovers).
  */
 export function startScheduler(options: SchedulerOptions): () => void {
   console.log('[Scheduler] Initializing H4 candle-close scheduler...');
@@ -86,7 +90,7 @@ export function startScheduler(options: SchedulerOptions): () => void {
   lastScannedCloseMs = readLastScanned();
 
   const tick = async () => {
-    const now = Date.now();
+    const now = marketNowMs();
     const clock = getMarketClock(now);
     const { date: dateStr, hour } = clock.cairo;
 

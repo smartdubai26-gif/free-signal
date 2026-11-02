@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient';
 import { fetchLiveMarketRates } from './liveMarketData';
 import { DiagnosticReport, DiagnosticItem, AssetFreshness, PipelineHealth } from '../types/signals';
+import { isMarketClosed } from './marketClock';
 
 export const TRACKED_10_ASSETS = [
   'XAU/USD',
@@ -491,8 +492,11 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
       }
 
       const ageHours = mostRecentTimeMs > 0 ? Number(((nowMs - mostRecentTimeMs) / (3600 * 1000)).toFixed(1)) : null;
-      const isWeekend = new Date(nowMs).getUTCDay() === 0 || new Date(nowMs).getUTCDay() === 6;
-      const thresholdHours = isWeekend ? 72 : 24;
+      // BUGFIX (v7): the staleness threshold used to widen for BOTH Sunday and
+      // Saturday. Sunday is a normal trading day now, so a 72h tolerance there
+      // would hide a genuinely dead feed for three days.
+      const isHoliday = isMarketClosed(nowMs);
+      const thresholdHours = isHoliday ? 72 : 24;
       const isServerRecent = ageHours !== null && ageHours <= thresholdHours;
 
       serverStatusCheckResult = {

@@ -261,19 +261,25 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
                 </div>
               </div>
 
-              {/* Middle Column: Entry / Target Levels */}
-              <div className="hidden lg:grid grid-cols-3 gap-3 text-xs font-mono text-slate-300">
-                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center">
-                  <span className="text-[10px] text-slate-400 block">سعر الدخول</span>
-                  <span className="text-white font-semibold">{sig.entry.toFixed(sig.pipValueDecimals)}</span>
+              {/* Middle Column: Entry / Target Levels.
+                  BUGFIX (missing top value on desktop): this block was
+                  `hidden lg:grid`, so below 1024px the entry price, the stop
+                  loss and TP1 simply did not exist in the DOM — the card showed
+                  a symbol and a pip count with no levels at all. It is now a
+                  responsive grid that is always present: 3 columns from `sm`
+                  up, and a 3-up compact row on phones. */}
+              <div className="grid grid-cols-3 gap-2 sm:gap-3 text-xs font-mono text-slate-300 w-full sm:w-auto sm:flex-1 sm:max-w-md">
+                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center min-w-0">
+                  <span className="text-[10px] text-slate-400 block truncate">سعر الدخول</span>
+                  <span className="text-white font-semibold block truncate">{sig.entry.toFixed(sig.pipValueDecimals)}</span>
                 </div>
-                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center">
-                  <span className="text-[10px] text-slate-400 block">وقف الخسارة SL</span>
-                  <span className="text-rose-400 font-semibold">{sig.stopLoss.toFixed(sig.pipValueDecimals)}</span>
+                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center min-w-0">
+                  <span className="text-[10px] text-slate-400 block truncate">وقف الخسارة SL</span>
+                  <span className="text-rose-400 font-semibold block truncate">{sig.stopLoss.toFixed(sig.pipValueDecimals)}</span>
                 </div>
-                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center">
-                  <span className="text-[10px] text-slate-400 block">الهدف TP1 / TP2</span>
-                  <span className="text-sky-400 font-semibold">{sig.takeProfit1.toFixed(sig.pipValueDecimals)}</span>
+                <div className="p-2 bg-slate-950/60 rounded border border-slate-800 text-center min-w-0">
+                  <span className="text-[10px] text-slate-400 block truncate">الهدف TP1 / TP2</span>
+                  <span className="text-sky-400 font-semibold block truncate">{sig.takeProfit1.toFixed(sig.pipValueDecimals)}</span>
                 </div>
               </div>
 

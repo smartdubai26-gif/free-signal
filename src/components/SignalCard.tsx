@@ -101,6 +101,7 @@ export const SignalCard: React.FC<SignalCardProps> = ({
 
   return (
     <div
+      data-testid="signal-card"
       className={`group relative bg-slate-900/90 border transition-all duration-200 rounded-xl p-4 sm:p-5 flex flex-col justify-between shadow-lg hover:shadow-xl ${
         signal.isTopOpportunity
           ? 'border-amber-500/50 hover:border-amber-400 bg-gradient-to-b from-amber-950/20 via-slate-900 to-slate-900 ring-1 ring-amber-500/20'

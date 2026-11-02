@@ -4,6 +4,8 @@
  * Tracks last valid tick timestamps, finalized candles, and unrecoverable data gaps.
  */
 
+import { isMarketClosed } from '../marketClock';
+
 export interface AggregatedCandle {
   symbol: string;
   interval: string; // 'M1' | 'M5' | 'M15' | 'M30'
@@ -49,22 +51,17 @@ export function getUTCIntervalBoundary(timestamp: number, intervalMinutes: numbe
 }
 
 /**
- * Helper to check if a UTC timestamp falls within standard Forex weekend closure:
- * Friday 21:00 UTC to Sunday 21:00 UTC.
+ * True when a UTC timestamp falls inside a market closure.
+ *
+ * BUGFIX (v7): this used to hard-code its own copy of the old weekend rule.
+ * BUGFIX (v9): "closed" is not only Saturday — the public-holiday calendar
+ * closes the market too, and a gap detector that ignored it would report
+ * "missing candles" through Christmas Day.
+ *
+ * The rule now lives in exactly one place: `marketClock.isMarketClosed()`.
  */
 export function isForexMarketClosed(timestampMs: number): boolean {
-  const date = new Date(timestampMs);
-  const day = date.getUTCDay(); // 0 is Sunday, 5 is Friday, 6 is Saturday
-  const hour = date.getUTCHours();
-
-  // Friday after 21:00 UTC
-  if (day === 5 && hour >= 21) return true;
-  // Saturday all day
-  if (day === 6) return true;
-  // Sunday before 21:00 UTC
-  if (day === 0 && hour < 21) return true;
-
-  return false;
+  return isMarketClosed(timestampMs);
 }
 
 export class TickAggregator {

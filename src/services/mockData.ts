@@ -108,7 +108,7 @@ export const MARKET_SESSIONS: MarketSession[] = [
  * activation could ever have happened.
  *
  * Now the timestamp is the last moment the FX week actually opened, so a
- * seed can never claim an activation inside a closed weekend.
+ * seed can never claim an activation on the Saturday holiday.
  */
 const _seedClock = getMarketClock();
 const todayIsoStr = new Date(_seedClock.lastOpenMs).toISOString();
@@ -558,7 +558,7 @@ const SEED_TEMPLATES: Signal[] = [
  * Behaviour by market state:
  *  - Market OPEN  -> signals are stamped at the real session open and are
  *                    presented as active/pending, same as before.
- *  - Market CLOSED (weekend / Friday-close / Sunday-preopen) -> the same
+ *  - Market CLOSED (Saturday only, Cairo calendar) -> the same
  *                    setups are returned but explicitly EXPIRED, stamped at
  *                    the last real session open and closed at week end.
  *                    The UI must render these as "منتهية", never as today's

@@ -321,26 +321,52 @@ test('Phase 19 — 3.2: Concurrent gap recoveries for the same symbol/timeframe 
   assert.strictEqual(fetchCount, 1, 'In-flight recoveries must deduplicate concurrent requests');
 });
 
-test('Phase 19 — 3.3: Weekend gap detection skips Forex closure window (Friday 21:00 UTC to Sunday 21:00 UTC)', () => {
-  // Friday Oct 23 2026, 21:30 UTC -> Market is officially closed
-  const fridayClosed = new Date('2026-10-23T21:30:00Z').getTime();
-  assert.strictEqual(isForexMarketClosed(fridayClosed), true);
+test('Phase 19 — 3.3: Gap detection skips the market holiday (Saturday only, Cairo calendar)', () => {
+  // BUGFIX (v9): the label says "Cairo calendar" but the timestamps were read as
+  // UTC. 21:30Z on 23 Oct 2026 is 00:30 on SATURDAY in Cairo (UTC+2), so the
+  // assertion "Friday evening must be open" was asserting the opposite of the
+  // product rule and had been failing silently — this suite could not even
+  // start before v9 because `import.meta.env` threw under Node.
+  //
+  // Anchors below are chosen on the Cairo calendar and stated with their Cairo
+  // time, so the intent is readable without converting in your head.
 
-  // Saturday Oct 24 2026, 12:00 UTC -> Market is officially closed
-  const saturdayClosed = new Date('2026-10-24T12:00:00Z').getTime();
-  assert.strictEqual(isForexMarketClosed(saturdayClosed), true);
+  // Cairo Friday 23:30 (20:30Z) — still Friday, trading.
+  const fridayEvening = new Date('2026-10-23T20:30:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(fridayEvening), false);
 
-  // Sunday Oct 25 2026, 20:30 UTC -> Market is closed
-  const sundayClosed = new Date('2026-10-25T20:30:00Z').getTime();
-  assert.strictEqual(isForexMarketClosed(sundayClosed), true);
+  // Cairo Saturday 00:00 (21:00Z Friday) — the closure starts exactly here.
+  const saturdayStart = new Date('2026-10-23T21:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(saturdayStart), true);
 
-  // Sunday Oct 25 2026, 21:30 UTC -> Market is OPEN (Sydney session open)
-  const sundayOpen = new Date('2026-10-25T21:30:00Z').getTime();
-  assert.strictEqual(isForexMarketClosed(sundayOpen), false);
+  // Cairo Saturday 15:00 (12:00Z) — mid-closure.
+  const saturdayMid = new Date('2026-10-24T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(saturdayMid), true);
 
-  // Monday Oct 26 2026, 10:00 UTC -> Market is OPEN
-  const mondayOpen = new Date('2026-10-26T10:00:00Z').getTime();
+  // Cairo Sunday 00:00 (21:00Z Saturday) — the closure has ended.
+  const sundayStart = new Date('2026-10-24T21:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(sundayStart), false);
+
+  // Cairo Sunday 23:30 (20:30Z) — Sunday is a full trading day.
+  const sundayEvening = new Date('2026-10-25T20:30:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(sundayEvening), false);
+
+  // Cairo Monday 02:00 (00:00Z) — open.
+  const mondayOpen = new Date('2026-10-26T00:00:00Z').getTime();
   assert.strictEqual(isForexMarketClosed(mondayOpen), false);
+
+  // v9 addition: a public holiday closes the feed exactly like Saturday does.
+  const christmas = new Date('2026-12-25T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(christmas), true);
+
+  // ...and the day after Christmas 2026 (a Saturday) is still closed by the
+  // weekly rule, which is why the reopen lands on Monday 28 Dec.
+  const boxingDay2026 = new Date('2026-12-26T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(boxingDay2026), true);
+
+  // An ordinary Tuesday is open.
+  const ordinaryTuesday = new Date('2026-12-29T12:00:00Z').getTime();
+  assert.strictEqual(isForexMarketClosed(ordinaryTuesday), false);
 });
 
 // ============================================================================
